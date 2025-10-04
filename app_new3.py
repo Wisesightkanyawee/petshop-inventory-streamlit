@@ -111,21 +111,48 @@ def fmt_commas(df: pd.DataFrame, int_cols=(), float_cols=()):
 def style_diverging_percent(df: pd.DataFrame):
     """Style percent tables with a red-yellow-green gradient centered at 0.
 
-    Assumes the DataFrame values are already in percent units (e.g., -12.34, 45.67), not 0-1.
+    มี fallback กรณี deploy แล้วไม่ได้ติดตั้ง matplotlib (pandas Styler.background_gradient ต้องใช้ matplotlib)
+    หากไม่มี matplotlib จะใช้การคำนวณสีด้วยตนเอง (inline CSS) แทน
     """
-    # Compute symmetric bounds around 0 for a fair diverging scale
     arr = df.replace([np.inf, -np.inf], np.nan).to_numpy(dtype=float)
-    if arr.size:
-        # ignore NaNs when finding max abs
-        absmax = np.nanmax(np.abs(arr))
+    absmax = np.nanmax(np.abs(arr)) if arr.size else None
+    if absmax and absmax > 0:
+        vmin, vmax = -absmax, absmax
     else:
-        absmax = None
-    vmin, vmax = (-absmax, absmax) if absmax and absmax > 0 else (None, None)
-    return (
-        df.style
-          .format("{:+,.2f}%")
-          .background_gradient(cmap="RdYlGn", vmin=vmin, vmax=vmax, axis=None)
-    )
+        vmin = vmax = None
+    try:
+        import matplotlib  # noqa: F401
+        return (
+            df.style
+              .format("{:+,.2f}%")
+              .background_gradient(cmap="RdYlGn", vmin=vmin, vmax=vmax, axis=None)
+        )
+    except Exception:
+        # Manual fallback: map value -> color (red -> yellow -> green)
+        def _color(val):
+            if pd.isna(val) or absmax in (None, 0):
+                return ""  # no style
+            # normalize to [-1,1]
+            norm = max(-1, min(1, val / absmax))
+            # interpolate: negative -> red (rgb(220,60,50)), zero -> yellow (255, 220, 60), positive -> green (60,160,60)
+            if norm >= 0:
+                # yellow -> green
+                r1,g1,b1 = 255,220,60
+                r2,g2,b2 = 60,160,60
+                t = norm
+            else:
+                # red -> yellow
+                r1,g1,b1 = 220,60,50
+                r2,g2,b2 = 255,220,60
+                t = norm + 1  # map [-1,0] -> [0,1]
+            r = int(r1 + (r2 - r1)*t)
+            g = int(g1 + (g2 - g1)*t)
+            b = int(b1 + (b2 - b1)*t)
+            return f"background-color: rgb({r},{g},{b});"
+
+        styled = df.copy()
+        styler = styled.style.format("{:+,.2f}%").applymap(_color)
+        return styler
 
 # ✅ NEW: ฟังก์ชันสร้างตาราง MoM
 def build_mom_table(df, group_col, value_col):
