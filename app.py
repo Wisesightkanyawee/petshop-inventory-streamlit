@@ -181,6 +181,149 @@ if st.session_state.get("ran") and uploaded_sales and uploaded_stock:
             sales["Category"] = np.nan
         sales["Category_disp"] = sales["Category"].fillna("Uncategorized").astype(str)
 
+        # ====== Create Brand & Cate_and_band ======
+        import re
+
+        def extract_brand(item: str) -> str:
+            if not isinstance(item, str):
+                return ''
+            text = item.strip()
+            if not text:
+                return ''
+            tokens = text.split()
+            lt = [t.lower().strip('.,') for t in tokens]
+
+            def join(n: int):
+                return ' '.join(tokens[:n])
+
+            # --- rules ทั้งหมด ---
+            if len(lt) >= 4 and lt[0]=='solid' and lt[1]=='gold' and lt[2]=='indigo' and lt[3]=='moon':
+                return 'Solid Gold Indigo moon'
+            if len(lt) >= 4 and lt[0]=='taste' and lt[1]=='of' and lt[2]=='the' and lt[3]=='wild':
+                return 'Taste of the Wild'
+            if lt[0]=='odour' and len(lt)>=2 and lt[1]=='lock':
+                return 'Odour Lock multi-cat'
+            if lt[0] in {'22','22pet'}:
+                return '22Pet'
+            if lt[0] in {'boqifactory','boqi'}:
+                return 'BoqiFactory'
+            if len(lt)>=1 and (lt[0].replace('-', '') in {'meo','me0'}) or lt[0] in {'me-o','me-o,'}:
+                return 'Me-o'
+            if lt[0]=='dog' and len(lt)>=3 and lt[1] in {'n','n,'} and lt[2]=='joy':
+                return 'Dog n joy'
+            if lt[0]=='cat':
+                if len(lt)>=3 and lt[1] in {'n','n,'} and lt[2]=='joy':
+                    return 'Cat n joy'
+                if len(lt)>=2 and lt[1]=='taste':
+                    return 'Cat taste'
+                if len(lt)>=2 and lt[1] in {'it','me'}:
+                    return join(2)
+                return tokens[0]
+            if lt[0]=='bite':
+                if len(lt)>=3 and lt[1]=='of':
+                    if lt[2]=='wild':
+                        return 'Bite of Wild'
+                    if lt[2]=='the' and len(lt)>=4 and lt[3]=='wild':
+                        return 'Bite of the Wild'
+                return tokens[0]
+            if lt[0]=='cheer' and len(lt)>=2 and lt[1]=='share':
+                return 'Cheer Share'
+            if lt[0]=='kat':
+                if len(lt)>=2 and lt[1] in {'club','to'}:
+                    return join(2)
+                return tokens[0]
+            if tokens[0].lower().rstrip('.') == 'mr':
+                if len(lt)>=2 and lt[1]=='vet':
+                    return 'Mr Vet'
+                return 'Mr'
+            if lt[0]=='dream' and len(lt)>=2 and lt[1]=='litty':
+                return 'dream litty'
+            if lt[0]=='vif' and len(lt)>=2 and lt[1]=='clair':
+                return 'VIF Clair'
+            if lt[0]=='kitty':
+                if len(lt)>=2 and lt[1] in {'licks','treats'}:
+                    return 'Kitty ' + tokens[1].capitalize()
+                return 'Kitty'
+            if lt[0]=='ocean' and len(lt)>=2 and lt[1]=='star':
+                return 'Ocean Star'
+            if lt[0]=='catit' and len(lt)>=2 and lt[1]=='creamy':
+                return 'Catit creamy'
+            if lt[0]=='dox' and len(lt)>=2 and lt[1]=='club':
+                return 'Dox Club'
+            if lt[0]=='lucky' and len(lt)>=2 and lt[1]=='dog':
+                return 'Lucky Dog'
+            if lt[0]=='bok' and len(lt)>=2 and lt[1] in {'bok','dok'}:
+                return join(2)
+            if lt[0]=='am' and len(lt)>=2 and lt[1]=='goat':
+                return 'AM Goat'
+            if lt[0]=='bully' and len(lt)>=2 and lt[1]=='stick':
+                return 'Bully Stick'
+            if lt[0]=='bux' and len(lt)>=2 and lt[1]=='away':
+                return 'Bux Away'
+            if lt[0]=='cotton' and len(lt)>=2 and lt[1]=='bud':
+                return 'Cotton Bud'
+            if lt[0]=='daili' and len(lt)>=2 and lt[1]=='pet':
+                return 'Daili Pet'
+            if lt[0]=='dental' and len(lt)>=2 and lt[1]=='bone':
+                return 'Dental Bone'
+            if lt[0]=='dogster' and len(lt)>=3 and lt[1]=='play' and lt[2]=='mix':
+                return 'Dogster play mix'
+            if lt[0]=='goat' and len(lt)>=2 and lt[1]=='milk':
+                return 'Goat milk'
+            if lt[0]=='kelly' and len(lt)>=2 and ("co" in lt[1]):
+                return "Kelly co's"
+            if lt[0]=='lola' and len(lt)>=3 and lt[1]=='healthy' and lt[2]=='growth':
+                return 'Lola Healthy Growth'
+            if lt[0]=='love':
+                if len(lt)>=2 and lt[1] in {'me','cubes'}:
+                    return 'Love ' + tokens[1]
+                return 'Love'
+            if lt[0]=='loveme':
+                return 'Loveme'
+            if lt[0]=='nano' and len(lt)>=2 and lt[1]=='care':
+                return 'Nano care'
+            if lt[0]=='optimum' and len(lt)>=2 and lt[1]=='spirulina':
+                return 'Optimum Spirulina'
+            if lt[0]=='ostech' and len(lt)>=2 and lt[1]=='ultra':
+                return 'Ostech ultra'
+            if lt[0].startswith("p'") and len(lt)>=2 and lt[1]=='sak':
+                return "P' Sak"
+            if lt[0]=='ped' and len(lt)>=3 and lt[1]=='denta' and lt[2]=='stix':
+                return 'Ped Denta Stix'
+            if lt[0]=='paws' and len(lt)>=2 and lt[1]=='feliz':
+                return 'Paws Feliz'
+            if lt[0]=='pet' and len(lt)>=2 and lt[1] in {'ranger','trainingpad'}:
+                return 'Pet ' + tokens[1]
+            if lt[0]=='revo' and len(lt)>=2 and lt[1]=='plus':
+                return 'Revo Plus'
+            if lt[0]=='royal':
+                if len(lt)>=2 and lt[1]=='topping':
+                    return 'Royal Topping'
+                if len(lt)>=3 and lt[1]=='herbal' and lt[2]=='spray':
+                    return 'Royal Herbal spray'
+                return 'Royal'
+            return tokens[0]
+
+        def refine_brand(row):
+            b = row['Brand']
+            if row.get('Category') == 'CAT Snack' and b == 'Me-o':
+                txt = str(row['Item'])
+                low = txt.lower()
+                if 'treat' in low:
+                    return 'Me-o treat'
+                if 'แมวเลีย' in txt:
+                    return 'Me-o แมวเลีย'
+            return b
+
+        # apply
+        if "Item" in sales.columns:
+            sales["Brand"] = sales["Item"].apply(extract_brand)
+            sales["Brand"] = sales.apply(refine_brand, axis=1)
+            sales["Cate_and_band"] = sales["Category_disp"].astype(str).str.strip() + " [" + sales["Brand"].astype(str) + "]"
+        else:
+            sales["Cate_and_band"] = sales["Category_disp"]
+
+
         # KPI after filter
         cdbg1, cdbg2, cdbg3 = st.columns(3)
         cdbg1.metric("✅ รวม Quantity (ชิ้น)", f"{float(sales['Quantity'].sum()):,.0f}")
@@ -429,6 +572,95 @@ if st.session_state.get("ran") and uploaded_sales and uploaded_stock:
                     color=alt.value("#2ca02c")  # สีที่สอง (ปล่อยไว้ก็ได้ ถ้าอยากสี default ลบบรรทัดนี้)
                 )
                 st.altair_chart((line_net + line_gp).resolve_scale(y='independent').properties(height=360), use_container_width=True)
+
+                # ===== NEW: Line chart by Cate_and_band =====
+                st.markdown("### 📈 ยอดขายราย Category+Brand (Cate_and_band) ตามเวลา")
+
+                if "Cate_and_band" not in sales_f.columns:
+                    st.warning("⚠️ ไม่มีคอลัมน์ Cate_and_band กรุณาสร้างก่อน")
+                else:
+                    ts_cb = make_timegrain(sales_f, timegrain)
+
+                    # เตรียมข้อมูล
+                    ts_cb_agg = (
+                        ts_cb.groupby(["Timegrain", "Cate_and_band"], as_index=False)
+                            .agg(
+                                Net_sales=("Net sales", "sum"),
+                                Gross_profit=("Gross profit", "sum")
+                            )
+                    )
+
+                    # 🔹 แยก Category ใหญ่ (ตัดจาก Cate_and_band ก่อน [ ... ])
+                    ts_cb_agg["Category"] = ts_cb_agg["Cate_and_band"].str.split("[").str[0].str.strip()
+
+                    # 🔹 Filter Category (checkbox list)
+                    categories = sorted(ts_cb_agg["Category"].unique())
+                    selected_categories = st.multiselect(
+                        "เลือก Category ที่ต้องการ",
+                        options=categories,
+                        default=categories[:1]
+                    )
+
+                    ts_cb_cat = ts_cb_agg[ts_cb_agg["Category"].isin(selected_categories)]
+
+                    # 🔹 Filter Brand (checkbox list)
+                    brand_options = sorted(ts_cb_cat["Cate_and_band"].unique())
+                    selected_cate_band = st.multiselect(
+                        "เลือก Brand (ภายใต้ Category ที่เลือก)",
+                        options=brand_options,
+                        default=brand_options[:5]
+                    )
+
+                    ts_cb_cat = ts_cb_cat[ts_cb_cat["Cate_and_band"].isin(selected_cate_band)]
+
+                    # 🔹 เลือก Metric (Net Sales / Gross Profit)
+                    metric = st.radio(
+                        "เลือก Metric ที่ต้องการแสดง",
+                        ["Net sales", "Gross profit"],
+                        horizontal=True
+                    )
+
+                    if ts_cb_cat.empty:
+                        st.info("ℹ️ ไม่มีข้อมูลในตัวเลือกที่เลือก")
+                    else:
+                        # Chart หลัก
+                        main_chart = (
+                            alt.Chart(ts_cb_cat)
+                            .mark_line(point=True)
+                            .encode(
+                                x=alt.X("Timegrain:T", title=f"{timegrain}"),
+                                y=alt.Y(f"{'Net_sales' if metric=='Net sales' else 'Gross_profit'}:Q",
+                                        title=f"{metric} (Baht)"),
+                                color=alt.Color("Cate_and_band:N", title="Category+Brand"),
+                                tooltip=[
+                                    alt.Tooltip("Timegrain:T", title="Period"),
+                                    alt.Tooltip("Cate_and_band:N", title="Cate_and_band"),
+                                    alt.Tooltip("Net_sales:Q", title="Net sales", format=","),
+                                    alt.Tooltip("Gross_profit:Q", title="Gross profit", format=",")
+                                ]
+                            )
+                        )
+
+                        # ถ้าเลือก Gross Profit → เพิ่ม Net Sales แบบสีอ่อน
+                        if metric == "Gross profit":
+                            shadow_chart = (
+                                alt.Chart(ts_cb_cat)
+                                .mark_line(point=False, strokeDash=[2,2], opacity=0.3)  # ✅ ทำให้เป็นเส้นอ่อน
+                                .encode(
+                                    x="Timegrain:T",
+                                    y="Net_sales:Q",
+                                    color=alt.Color("Cate_and_band:N", legend=None)  # ใช้สีเดียวกัน แต่เบลอ
+                                )
+                            )
+                            chart_cb = main_chart + shadow_chart
+                        else:
+                            chart_cb = main_chart
+
+                        chart_cb = chart_cb.properties(height=400).interactive()
+                        st.altair_chart(chart_cb, use_container_width=True)
+
+
+
 
                 # ===== 2) Top/Bottom Products & Categories =====
                 st.markdown("### 2) Top/Bottom Products & Categories")
