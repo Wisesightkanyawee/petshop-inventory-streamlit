@@ -1331,7 +1331,7 @@ if st.session_state.get("ran") and uploaded_sales and uploaded_stock:
             st.subheader("🧭 ตัวกรองการขาย")
             cA, cB, cC = st.columns([1,1,1])
             with cA:
-                timegrain = st.selectbox("Time grain", ["Daily", "Weekly", "Monthly"], index=1)
+                timegrain = st.selectbox("Time grain", ["Daily", "Weekly", "Monthly"], index=2)
             with cB:
                 cat_options = sorted(sales["Category_disp"].unique())
                 sel_cats = st.multiselect("Category", options=cat_options, default=cat_options)
@@ -1431,75 +1431,39 @@ if st.session_state.get("ran") and uploaded_sales and uploaded_stock:
                         category_sales['Percentage'] = (category_sales['Net sales'] / total_sales * 100).round(2)
                         
                         if not category_sales.empty and total_sales > 0:
-                            # สร้าง pie chart ที่ดูดีขึ้น
+                            # สร้าง pie chart แบบง่าย ๆ ที่ทำงานได้แน่นอน
                             pie_chart = alt.Chart(category_sales).mark_arc(
-                                innerRadius=60,
-                                outerRadius=150,
-                                stroke='white',
-                                strokeWidth=3
+                                innerRadius=50,
+                                outerRadius=120
                             ).encode(
                                 theta=alt.Theta('Net sales:Q', sort=alt.Sort(field='Net sales', order='descending')),
                                 color=alt.Color('Category_disp:N', 
-                                              scale=alt.Scale(scheme='category20'),
-                                              legend=alt.Legend(
-                                                  title="Category",
-                                                  orient="right",
-                                                  titleFontSize=14,
-                                                  labelFontSize=12,
-                                                  symbolSize=100
-                                              )),
+                                              scale=alt.Scale(scheme='category10'),
+                                              legend=alt.Legend(title="Category"),
+                                              sort=alt.Sort(field='Net sales', order='descending')),
                                 order=alt.Order('Net sales:Q', sort='descending'),
                                 tooltip=[
                                     alt.Tooltip('Category_disp:N', title='Category'),
-                                    alt.Tooltip('Net sales:Q', title='Net Sales', format=',.2f'),
-                                    alt.Tooltip('Percentage:Q', title='Percentage', format='.1f%')
+                                    alt.Tooltip('Net sales:Q', title='Net Sales', format=',.0f'),
+                                    alt.Tooltip('Percentage:Q', title='Percentage (%)', format='.1f')
                                 ]
-                            )
-                            
-                            # เพิ่ม text labels แสดงเปอร์เซ็นต์ (เฉพาะชิ้นใหญ่)
-                            text_chart = alt.Chart(category_sales).mark_text(
-                                radius=105,
-                                fontSize=12,
-                                fontWeight='bold',
-                                color='black',
-                                align='center',
-                                baseline='middle'
-                            ).encode(
-                                theta=alt.Theta('Net sales:Q', sort=alt.Sort(field='Net sales', order='descending')),
-                                text=alt.condition(
-                                    alt.datum.Percentage > 5, 
-                                    alt.Text('Percentage:Q', format='.1f'), 
-                                    alt.value('')
-                                ),
-                                order=alt.Order('Net sales:Q', sort='descending')
-                            )
-                            
-                            # รวม pie chart กับ text
-                            final_chart = (pie_chart + text_chart).resolve_scale(
-                                color='independent'
                             ).properties(
-                                width=600,
-                                height=450,
-                                title=alt.TitleParams(
-                                    text="Net Sales Distribution by Category",
-                                    fontSize=18,
-                                    fontWeight='bold',
-                                    anchor='start'
-                                )
+                                width=400,
+                                height=400,
+                                title="Net Sales Distribution by Category"
                             )
                             
                             # แสดง pie chart
-                            st.altair_chart(final_chart, use_container_width=True)
+                            st.altair_chart(pie_chart, use_container_width=True)
                             
-                            # แสดงตารางข้อมูล (เฉพาะ columns ที่ต้องการ)
-                            display_category_sales = category_sales[['Category_disp', 'Net sales', 'Percentage']].copy()
-                            st.dataframe(display_category_sales.style.format({
+                            # แสดงตารางข้อมูล
+                            st.dataframe(category_sales.style.format({
                                 'Net sales': '{:,.2f}',
                                 'Percentage': '{:.2f}%'
                             }), use_container_width=True)
                             
                             # ปุ่มดาวน์โหลด
-                            csv_category = display_category_sales.to_csv(index=False)
+                            csv_category = category_sales.to_csv(index=False)
                             st.download_button(
                                 label="📥 Download Category Sales",
                                 data=csv_category,
@@ -1513,6 +1477,12 @@ if st.session_state.get("ran") and uploaded_sales and uploaded_stock:
                         
                 except Exception as e:
                     st.error(f"❌ Error in Category Sales: {str(e)}")
+                    st.write("Debug info:")
+                    st.write(f"sales_f columns: {list(sales_f.columns)}")
+                    if 'Category_disp' in sales_f.columns:
+                        st.write(f"Category_disp unique values: {sales_f['Category_disp'].unique()}")
+                        st.write(f"Net sales data type: {sales_f['Net sales'].dtype}")
+                        st.write(f"Sample data: {sales_f[['Category_disp', 'Net sales']].head()}")
 
                 # ✅ ตาราง MoM ต่อ Category
                 st.markdown("#### 📊 ตาราง Net Sales (MoM) ต่อ Category — Value")
@@ -1707,6 +1677,94 @@ if st.session_state.get("ran") and uploaded_sales and uploaded_stock:
                     rule20 = alt.Chart(pd.DataFrame({"x":[0.2]})).mark_rule(strokeDash=[4,4]).encode(x="x:Q")
                     st.altair_chart(line + points + rule80 + rule20, use_container_width=True)
 
+                # แสดงตารางรายละเอียด Pareto Analysis
+                st.markdown("##### 📊 รายละเอียด Pareto Analysis")
+                
+                # สร้างตารางข้อมูล Pareto พร้อมการจัดกลุ่ม
+                pareto_display = pareto.copy()
+                
+                # เพิ่มคอลัมน์สำหรับแสดงผล
+                pareto_display["Rank"] = pareto_display["sku_rank"]
+                
+                # คำนวณเปอร์เซ็นต์แยกตัว และสะสม
+                pareto_display["Individual_%"] = (pareto_display["Net_sales"] / total_sales * 100).round(2)
+                pareto_display["Cumulative_%"] = (pareto_display["cum_share"] * 100).round(2)
+                
+                pareto_display["Group"] = np.where(
+                    pareto_display["sku_rank"] <= top_20pct_n, 
+                    "🔥 Top 20% (High Impact)", 
+                    "📈 Bottom 80% (Low Impact)"
+                )
+                
+                # เลือกคอลัมน์ที่จะแสดง
+                display_cols = ["Rank", "SKU", "Label", "Category_disp", "Net_sales", "Gross_profit", 
+                               "Quantity", "Individual_%", "Cumulative_%", "Group"]
+                
+                # กรองคอลัมน์ที่มีจริงในข้อมูล
+                available_cols = [col for col in display_cols if col in pareto_display.columns]
+                
+                # แสดงตารางแบบ interactive
+                pareto_table = pareto_display[available_cols].copy()
+                
+                # Tab สำหรับแสดงข้อมูลแยกตามกลุ่ม
+                tab_all, tab_top20, tab_bottom80 = st.tabs(["📋 All Items", "🔥 Top 20%", "📈 Bottom 80%"])
+                
+                with tab_all:
+                    st.dataframe(
+                        pareto_table.style.format({
+                            'Net_sales': '{:,.2f}',
+                            'Gross_profit': '{:,.2f}',
+                            'Quantity': '{:,.0f}',
+                            'Individual_%': '{:.2f}%',
+                            'Cumulative_%': '{:.2f}%'
+                        }),
+                        use_container_width=True,
+                        height=400
+                    )
+                    
+                    # ปุ่มดาวน์โหลด
+                    csv_pareto = pareto_table.to_csv(index=False)
+                    st.download_button(
+                        label="📥 Download Pareto Analysis",
+                        data=csv_pareto,
+                        file_name="pareto_analysis.csv",
+                        mime="text/csv"
+                    )
+                
+                with tab_top20:
+                    top_20_items = pareto_table[pareto_table["Group"] == "🔥 Top 20% (High Impact)"]
+                    st.write(f"**จำนวน SKU: {len(top_20_items)} รายการ ({(len(top_20_items)/len(pareto_table)*100):.1f}% ของ SKU ทั้งหมด)**")
+                    st.write(f"**สัดส่วนยอดขาย: {top_20_share*100:.1f}% ของยอดขายรวม**")
+                    
+                    st.dataframe(
+                        top_20_items.style.format({
+                            'Net_sales': '{:,.2f}',
+                            'Gross_profit': '{:,.2f}',
+                            'Quantity': '{:,.0f}',
+                            'Individual_%': '{:.2f}%',
+                            'Cumulative_%': '{:.2f}%'
+                        }),
+                        use_container_width=True
+                    )
+                
+                with tab_bottom80:
+                    bottom_80_items = pareto_table[pareto_table["Group"] == "📈 Bottom 80% (Low Impact)"]
+                    bottom_80_sales_share = (1 - top_20_share) * 100
+                    st.write(f"**จำนวน SKU: {len(bottom_80_items)} รายการ ({(len(bottom_80_items)/len(pareto_table)*100):.1f}% ของ SKU ทั้งหมด)**")
+                    st.write(f"**สัดส่วนยอดขาย: {bottom_80_sales_share:.1f}% ของยอดขายรวม**")
+                    
+                    st.dataframe(
+                        bottom_80_items.style.format({
+                            'Net_sales': '{:,.2f}',
+                            'Gross_profit': '{:,.2f}',
+                            'Quantity': '{:,.0f}',
+                            'Individual_%': '{:.2f}%',
+                            'Cumulative_%': '{:.2f}%'
+                        }),
+                        use_container_width=True,
+                        height=400
+                    )
+
                 # ===== 3) Margin Analysis =====
                 st.markdown("### 3) กำไรและ Margin Analysis")
                 sku_agg["Margin_pct"] = np.where(sku_agg["Net_sales"]>0,
@@ -1736,152 +1794,6 @@ if st.session_state.get("ran") and uploaded_sales and uploaded_stock:
                     int_cols=["Quantity"],
                     hide_index=False,
                 )
-
-
-                # ===== 4) Customer Behavior =====
-                st.markdown("### 4) Customer Behavior")
-                cust_ready = {"Customer name","Customer contacts"}.issubset(sales_f.columns)
-                # สร้าง customer_key แม้บางค่าเป็น null
-                if "Customer name" in sales_f.columns or "Customer contacts" in sales_f.columns:
-                    sales_f["Customer name"]    = sales_f.get("Customer name", "").astype(str)
-                    sales_f["Customer contacts"] = sales_f.get("Customer contacts", "").astype(str)
-                    sales_f["customer_key"] = (sales_f["Customer name"].str.strip() + " | " +
-                                              sales_f["Customer contacts"].str.strip()).str.strip(" |")
-                else:
-                    sales_f["customer_key"] = np.nan
-
-                # Repeat vs New
-                if sales_f["customer_key"].notna().any():
-                    first_date = (sales_f.sort_values("Date")
-                                  .groupby("customer_key", as_index=False)["Date"].min()
-                                  .rename(columns={"Date":"first_buy"}))
-                    joined = sales_f.merge(first_date, on="customer_key", how="left")
-                    joined["is_new"] = joined["Date"].dt.date == joined["first_buy"].dt.date
-                    cust_counts = joined.groupby("customer_key").agg(
-                        first_buy=("first_buy","min"),
-                        orders=("customer_key","count"),
-                        total_spent=("Net sales","sum")
-                    ).reset_index()
-                    cust_counts["type"] = np.where(cust_counts["orders"]>1, "Repeat", "New")
-                    total_cust = cust_counts["customer_key"].nunique()
-                    new_pct    = (cust_counts["type"].eq("New").mean()*100) if total_cust>0 else 0
-                    rep_pct    = 100 - new_pct
-                    cR1, cR2, cR3 = st.columns(3)
-                    cR1.metric("ลูกค้ารวม (unique)", f"{total_cust:,}")
-                    cR2.metric("New (%)", f"{new_pct:,.1f}%")
-                    cR3.metric("Repeat (%)", f"{rep_pct:,.1f}%")
-                else:
-                    st.info("ℹ️ ไม่มีข้อมูลลูกค้า (Customer name/contacts) เพียงพอสำหรับ Repeat vs New")
-
-                # Average Basket Size
-                # ถ้ามี Receipt number ใช้อันนั้นเป็นบิล; ถ้าไม่มีก็ group โดย (Date, customer_key) เป็น proxy
-                if "Receipt number" in sales_f.columns:
-                    orders = (sales_f.groupby("Receipt number", as_index=False)
-                                      .agg(order_value=("Net sales","sum")))
-                elif sales_f["customer_key"].notna().any():
-                    orders = (sales_f.groupby(["customer_key", sales_f["Date"].dt.date], as_index=False)
-                                      .agg(order_value=("Net sales","sum")))
-                else:
-                    orders = (sales_f.groupby(sales_f["Date"].dt.date, as_index=False)
-                                      .agg(order_value=("Net sales","sum")))
-                avg_basket = orders["order_value"].mean() if not orders.empty else 0.0
-                st.metric("🛒 Average Basket Size (บาท/บิล)", f"{avg_basket:,.2f}")
-
-                # Interpurchase Time (IPT)
-                if sales_f["customer_key"].notna().any():
-                    ipt_list = []
-                    for cid, g in sales_f.groupby("customer_key"):
-                        ds = g["Date"].sort_values().drop_duplicates().to_list()
-                        if len(ds) >= 2:
-                            diffs = np.diff(pd.to_datetime(ds)).astype("timedelta64[D]").astype(int)
-                            if len(diffs)>0:
-                                ipt_list.extend(diffs)
-                    if len(ipt_list) > 0:
-                        ipt_ser = pd.Series(ipt_list)
-                        st.write(f"📅 Interpurchase Time (days) — mean: **{ipt_ser.mean():,.1f}** | median: **{ipt_ser.median():,.0f}**")
-                        ipt_df = pd.DataFrame({"IPT_days": ipt_ser})
-                        hist = alt.Chart(ipt_df).mark_bar().encode(
-                            x=alt.X("IPT_days:Q", bin=alt.Bin(maxbins=30), title="Days between purchases"),
-                            y=alt.Y("count():Q", title="Count")
-                        ).properties(height=250)
-                        st.altair_chart(hist, use_container_width=True)
-
-                        # ===== Customer-level IPT summary & items =====
-                        st.markdown("#### 👥 Interpurchase Summary by Customer")
-
-                        # เฉพาะเคสที่มี customer_key
-                        if sales_f["customer_key"].notna().any():
-                            # 1) กำหนด label สินค้า (ถ้ามี Item ใช้ Item ไม่งั้นใช้ SKU)
-                            if "Item" in sales_f.columns:
-                                sales_f["item_label"] = sales_f["Item"].astype(str).where(
-                                    sales_f["Item"].notna(), sales_f["SKU"].astype(str)
-                                )
-                            else:
-                                sales_f["item_label"] = sales_f["SKU"].astype(str)
-
-                            # 2) รวมสถิติ IPT ต่อหัวลูกค้า
-                            def _ipt_stats(g: pd.DataFrame) -> pd.Series:
-                                ds = g["Date"].sort_values().drop_duplicates().to_numpy()
-                                diffs = np.diff(ds).astype("timedelta64[D]").astype(int) if len(ds) >= 2 else np.array([], dtype=int)
-                                return pd.Series({
-                                    "orders": len(ds),
-                                    "IPT_count": len(diffs),
-                                    "IPT_mean": float(np.mean(diffs)) if len(diffs) > 0 else np.nan,
-                                    "IPT_median": float(np.median(diffs)) if len(diffs) > 0 else np.nan,
-                                    "Quantity": g["Quantity"].sum(),
-                                    "Total_spent": g["Net sales"].sum(),
-                                    "Last_purchase": g["Date"].max(),
-                                })
-
-                            cust_stats = (sales_f.groupby("customer_key").apply(_ipt_stats).reset_index())
-
-                            # 3) Top 10 รายการต่อหัวลูกค้า (ชื่อสินค้า — มูลค่า — % ของ Total_spent)
-                            top_items = (
-                                sales_f.groupby(["customer_key", "item_label"], as_index=False)
-                                    .agg(spent=("Net sales","sum"))
-                            ).merge(
-                                cust_stats[["customer_key","Total_spent"]], on="customer_key", how="left"
-                            )
-
-                            top_items["pct"] = np.where(
-                                top_items["Total_spent"] > 0,
-                                100 * top_items["spent"] / top_items["Total_spent"],
-                                0
-                            )
-
-                            # เลือก top 10 ต่อ customer และรวมเป็นข้อความหลายบรรทัด
-                            top_items = (
-                                top_items.sort_values(["customer_key","spent"], ascending=[True, False])
-                                        .groupby("customer_key")
-                                        .head(10)
-                            )
-                            top_items["detail"] = top_items.apply(
-                                lambda r: f"{r['item_label']} — {r['spent']:,.0f}฿ ({r['pct']:.1f}%)", axis=1
-                            )
-                            items_fmt = (
-                                top_items.groupby("customer_key")["detail"]
-                                        .apply(lambda s: "\n".join(s))
-                                        .reset_index(name="Top 10 purchases")
-                            )
-
-                            # 4) รวมกลับและเรียงลำดับ
-                            cust_stats = (cust_stats
-                                        .merge(items_fmt, on="customer_key", how="left")
-                                        .sort_values(["IPT_count","orders","Total_spent"],
-                                                    ascending=[False, False, False]))
-
-                            # 5) แสดงผล (เหลือคอลัมน์ใหม่เดียว)
-                            cols = [
-                                "customer_key","orders","IPT_count","IPT_mean","IPT_median",
-                                "Quantity","Total_spent","Last_purchase","Top 10 purchases"
-                            ]
-                            show_df_commas(
-                                cust_stats[cols],
-                                int_cols=["orders","IPT_count","Quantity"],
-                                hide_index=False,
-                            )
-
-                            st.caption("หมายเหตุ: IPT_count คือจำนวน 'ช่วงเวลาระหว่างการซื้อ' ต่อหัวลูกค้า (ไม่ใช่จำนวนลูกค้า)")
 
         # ---------------- TAB 3: การวิเคราะห์ยอดขายตก ----------------
         with tab_drop:
