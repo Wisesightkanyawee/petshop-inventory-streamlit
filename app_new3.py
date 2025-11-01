@@ -1,4 +1,4 @@
-# app.py
+﻿# app.py
 # Smart Reorder Tool — robust for (Sales: SKU, Quantity, Net sales, Cost of goods, Date)
 # and (Inventory: SKU, In stock [I-animal], Cost)
 
@@ -19,8 +19,10 @@ if "ran" not in st.session_state:
 left, right = st.columns([1, 1])
 
 with left:
-    uploaded_sales = st.file_uploader('📤 Upload "Sales by item" file (.CSV)', type=["csv"])
+    uploaded_sales = st.file_uploader('📤 Upload "Receipts by item" file (.CSV)', type=["csv"])
     uploaded_stock = st.file_uploader('📤 Upload "Inventory" file (.CSV)', type=["csv"])
+    uploaded_receipts = st.file_uploader('📤 Upload "Receipts data" file (.CSV)', type=["csv"])
+    uploaded_customers = st.file_uploader('📤 Upload "Customer data" file (.CSV)', type=["csv"])
     stock_days   = st.number_input("📦 Stock Coverage Target (Day)", value=45, min_value=1)
     reorder_days = st.number_input("🔁 สั่งของอีกครั้งในอีกกี่วัน", value=7, min_value=1)
     st.caption("Inventory columns expected: **SKU, In stock [I-animal] (or similar), Cost**")
@@ -32,6 +34,8 @@ with right:
         "- ยิ่งสูง → เสียโอกาสทำกำไรต่อวันมาก ควรเติมเร็ว"
     )
     st.caption("Sales columns expected: **Date, SKU, Item(optional), Quantity, Net sales, Cost of goods, Category(optional), Receipt number(optional), Customer name(optional), Customer contacts(optional)**")
+    st.caption("Receipts columns expected: **Date, Receipt number, Receipt type, Gross sales, Discounts, Net sales, Taxes, Total collected, Cost of goods, Gross profit, Payment type, Description, POS, Store, Cashier name, Customer name, Customer contacts, Status**")
+    st.caption("Customer columns expected: **Customer ID, Customer name, Email, Phone, Address, Points balance, Total spent, Total visits**")
 
 st.markdown("### ")
 run_center = st.columns([2, 1, 2])[1]
@@ -842,6 +846,105 @@ if st.session_state.get("ran") and uploaded_sales and uploaded_stock:
         stock = clean_columns(pd.read_csv(uploaded_stock))
         sales.columns = sales.columns.str.strip()
         stock.columns = stock.columns.str.strip()
+        
+        # Load optional receipts data
+        receipts_data = None
+        if uploaded_receipts:
+            receipts_data = clean_columns(pd.read_csv(uploaded_receipts))
+            receipts_data.columns = receipts_data.columns.str.strip()
+            st.success("✅ Receipts data loaded successfully!")
+            
+            # Merge Payment type from receipts_data to sales
+            if 'Receipt number' in receipts_data.columns and 'Payment type' in receipts_data.columns:
+                # เลือกเฉพาะ Receipt number และ Payment type
+                payment_info = receipts_data[['Receipt number', 'Payment type']].copy()
+                payment_info = payment_info.drop_duplicates(subset=['Receipt number'])
+                
+                # Merge กับ sales data
+                if 'Receipt number' in sales.columns:
+                    sales = sales.merge(payment_info, on='Receipt number', how='left')
+                    st.info(f"✅ Merged Payment type: {sales['Payment type'].notna().sum():,} records matched")
+                    
+                    # สร้างคอลัมน์ Channel, Method, และ Method2 จาก Payment type
+                    def map_payment_to_channel_method(payment_type):
+                        """แปลง Payment type เป็น Channel และ Method"""
+                        if pd.isna(payment_type):
+                            return 'Unknown', 'Unknown'
+                        
+                        pt = str(payment_type).strip()
+                        
+                        # กำหนด mapping ตามตาราง
+                        payment_mapping = {
+                            'Cash': ('หน้าร้าน', 'เงินสด'),
+                            'Cash, หน้าร้าน QR (KBANK)': ('หน้าร้าน', 'เงินโอน'),
+                            'Cash, ออนไลน์+ส่งของ (โอน)': ('หน้าร้าน', 'เงินโอน'),
+                            'Grab & Lineman': ('ส่งของ', 'เงินโอน'),
+                            'TikTok': ('ส่งของ', 'เงินโอน'),
+                            'ส่งของ (โอน)': ('ส่งของ', 'เงินโอน'),
+                            'ส่งของ (โอน), ส่งของ (สด)': ('ส่งของ', 'เงินโอน'),
+                            'ส่งของ (สด)': ('ส่งของ', 'เงินสด'),
+                            'ส่งของ (สด), ส่งของ (โอน)': ('ส่งของ', 'เงินโอน'),
+                            'หน้าร้าน QR (KBANK)': ('หน้าร้าน', 'เงินโอน'),
+                            'หน้าร้าน QR (KBANK), Cash': ('หน้าร้าน', 'เงินโอน'),
+                            'ออนไลน์+ส่งของ (โอน)': ('ส่งของ', 'เงินโอน'),
+                            'ออนไลน์+ส่งของ (โอน), Cash': ('ส่งของ', 'เงินโอน'),
+                            'ออนไลน์+ส่งของ (โอน), ออนไลน์+ส่งของ (โอน)': ('ส่งของ', 'เงินโอน'),
+                            'ออนไลน์+ส่งของ (โอน), ออนไลน์+ส่งของ (สด)': ('ส่งของ', 'เงินโอน'),
+                            'ออนไลน์+ส่งของ (สด)': ('ส่งของ', 'เงินสด'),
+                            'ออนไลน์+ส่งของ (สด), ออนไลน์+ส่งของ (โอน)': ('ส่งของ', 'เงินโอน'),
+                        }
+                        
+                        return payment_mapping.get(pt, ('Unknown', 'Unknown'))
+                    
+                    def map_payment_to_method2(payment_type):
+                        """แปลง Payment type เป็น Method2 (เงินสด, เงินโอน, Grab & Lineman, TikTok)"""
+                        if pd.isna(payment_type):
+                            return 'Unknown'
+                        
+                        pt = str(payment_type).strip()
+                        
+                        # กำหนด mapping สำหรับ Method2
+                        method2_mapping = {
+                            'Cash': 'เงินสด',
+                            'Cash, หน้าร้าน QR (KBANK)': 'เงินโอน',
+                            'Cash, ออนไลน์+ส่งของ (โอน)': 'เงินโอน',
+                            'Grab & Lineman': 'Grab & Lineman',
+                            'TikTok': 'TikTok',
+                            'ส่งของ (โอน)': 'เงินโอน',
+                            'ส่งของ (โอน), ส่งของ (สด)': 'เงินโอน',
+                            'ส่งของ (สด)': 'เงินสด',
+                            'ส่งของ (สด), ส่งของ (โอน)': 'เงินโอน',
+                            'หน้าร้าน QR (KBANK)': 'เงินโอน',
+                            'หน้าร้าน QR (KBANK), Cash': 'เงินโอน',
+                            'ออนไลน์+ส่งของ (โอน)': 'เงินโอน',
+                            'ออนไลน์+ส่งของ (โอน), Cash': 'เงินโอน',
+                            'ออนไลน์+ส่งของ (โอน), ออนไลน์+ส่งของ (โอน)': 'เงินโอน',
+                            'ออนไลน์+ส่งของ (โอน), ออนไลน์+ส่งของ (สด)': 'เงินโอน',
+                            'ออนไลน์+ส่งของ (สด)': 'เงินสด',
+                            'ออนไลน์+ส่งของ (สด), ออนไลน์+ส่งของ (โอน)': 'เงินโอน',
+                        }
+                        
+                        return method2_mapping.get(pt, 'Unknown')
+                    
+                    # Apply mapping
+                    sales[['Channel', 'Method']] = sales['Payment type'].apply(
+                        lambda x: pd.Series(map_payment_to_channel_method(x))
+                    )
+                    
+                    sales['Method2'] = sales['Payment type'].apply(map_payment_to_method2)
+                    
+                    st.success(f"✅ Created Channel, Method, and Method2 columns from Payment type")
+                else:
+                    st.warning("⚠️ Sales data ไม่มีคอลัมน์ 'Receipt number' - ไม่สามารถ merge Payment type ได้")
+            else:
+                st.warning("⚠️ Receipts data ไม่มีคอลัมน์ 'Payment type' หรือ 'Receipt number'")
+        
+        # Load optional customer data
+        customers_data = None
+        if uploaded_customers:
+            customers_data = clean_columns(pd.read_csv(uploaded_customers, encoding='utf-8-sig'))
+            customers_data.columns = customers_data.columns.str.strip()
+            st.success("✅ Customer data loaded successfully!")
 
         # ----- Harmonize SALES columns -----
         if "Net sales" not in sales.columns and "Gross sales" in sales.columns:
@@ -1417,6 +1520,276 @@ if st.session_state.get("ran") and uploaded_sales and uploaded_stock:
                 except Exception as e:
                     st.error(f"❌ Error in Monthly Summary: {str(e)}")
 
+                # ===== 💳 Channel & Payment Analysis =====
+                st.markdown("---")
+                st.markdown("### 💳 Channel & Payment Analysis")
+                
+                if 'Channel' in sales_f.columns and 'Method2' in sales_f.columns:
+                    # กรองข้อมูลที่มี Channel และ Method2 ที่ระบุได้
+                    channel_method_data = sales_f[(sales_f['Channel'] != 'Unknown') & 
+                                                   (sales_f['Method2'] != 'Unknown')].copy()
+                    
+                    if not channel_method_data.empty:
+                        # ===== 1) Channel Analysis =====
+                        st.markdown("#### 🏪 Sales by Channel (ช่องทางการขาย)")
+                        
+                        # สรุปยอดขายตาม Channel
+                        channel_summary = channel_method_data.groupby('Channel').agg({
+                            'Net sales': 'sum',
+                            'Gross profit': 'sum',
+                            'Receipt number': 'nunique' if 'Receipt number' in channel_method_data.columns else 'count',
+                            'Quantity': 'sum' if 'Quantity' in channel_method_data.columns else 'count'
+                        }).reset_index()
+                        channel_summary.columns = ['Channel', 'Net Sales', 'Gross Profit', 'Orders', 'Items']
+                        
+                        # คำนวณ Margin %
+                        channel_summary['Margin %'] = (channel_summary['Gross Profit'] / channel_summary['Net Sales'] * 100).round(2)
+                        channel_summary = channel_summary.sort_values('Net Sales', ascending=False)
+                        
+                        # แสดง KPI Cards
+                        col1, col2 = st.columns(2)
+                        
+                        for idx, row in channel_summary.iterrows():
+                            with col1 if idx == 0 else col2:
+                                emoji = "🏪" if row['Channel'] == "หน้าร้าน" else "🚚"
+                                sales_pct = (row['Net Sales'] / channel_summary['Net Sales'].sum() * 100)
+                                profit_pct = (row['Gross Profit'] / channel_summary['Gross Profit'].sum() * 100)
+                                
+                                st.markdown(f"""
+                                <div style='background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+                                            padding: 20px; border-radius: 10px; color: white; margin-bottom: 10px;'>
+                                    <h2 style='margin: 0;'>{emoji} {row['Channel']}</h2>
+                                    <h3 style='margin: 10px 0;'>💰 {row['Net Sales']:,.2f} บาท ({sales_pct:.1f}%)</h3>
+                                    <p style='margin: 5px 0;'>🎯 Gross Profit: {row['Gross Profit']:,.2f} บาท ({profit_pct:.1f}%)</p>
+                                    <p style='margin: 5px 0;'>📊 Margin: {row['Margin %']:.2f}%</p>
+                                    <p style='margin: 5px 0;'>📋 Orders: {int(row['Orders']):,} | 📦 Items: {int(row['Items']):,}</p>
+                                </div>
+                                """, unsafe_allow_html=True)
+                        
+                        # แสดงตาราง
+                        st.dataframe(
+                            channel_summary.style.format({
+                                'Net Sales': '{:,.2f}',
+                                'Gross Profit': '{:,.2f}',
+                                'Margin %': '{:.2f}%',
+                                'Orders': '{:,.0f}',
+                                'Items': '{:,.0f}'
+                            }),
+                            use_container_width=True,
+                            hide_index=True
+                        )
+                        
+                        # Chart แสดง Sales และ Profit by Channel
+                        col_chart1, col_chart2 = st.columns(2)
+                        
+                        with col_chart1:
+                            chart_sales = alt.Chart(channel_summary).mark_bar().encode(
+                                x=alt.X('Channel:N', title='Channel'),
+                                y=alt.Y('Net Sales:Q', title='Net Sales (฿)'),
+                                color=alt.Color('Channel:N', scale=alt.Scale(scheme='category10')),
+                                tooltip=['Channel:N', alt.Tooltip('Net Sales:Q', format=',.2f')]
+                            ).properties(width=300, height=300, title='Net Sales by Channel')
+                            st.altair_chart(chart_sales, use_container_width=True)
+                        
+                        with col_chart2:
+                            chart_profit = alt.Chart(channel_summary).mark_bar().encode(
+                                x=alt.X('Channel:N', title='Channel'),
+                                y=alt.Y('Gross Profit:Q', title='Gross Profit (฿)'),
+                                color=alt.Color('Channel:N', scale=alt.Scale(scheme='category10')),
+                                tooltip=['Channel:N', alt.Tooltip('Gross Profit:Q', format=',.2f')]
+                            ).properties(width=300, height=300, title='Gross Profit by Channel')
+                            st.altair_chart(chart_profit, use_container_width=True)
+                        
+                        # ===== 2) Trend Analysis by Channel =====
+                        st.markdown("#### 📈 แนวโน้มยอดขายแต่ละช่องทาง (Trend by Channel)")
+                        
+                        # เตรียมข้อมูล timeseries
+                        if 'Date' in channel_method_data.columns:
+                            trend_data = channel_method_data.copy()
+                            trend_data['Date'] = pd.to_datetime(trend_data['Date'], errors='coerce')
+                            trend_data = trend_data.dropna(subset=['Date'])
+                            
+                            if not trend_data.empty:
+                                # สร้าง Month column
+                                trend_data['Month'] = trend_data['Date'].dt.to_period('M').astype(str)
+                                
+                                # สรุปตาม Month และ Channel
+                                monthly_channel = trend_data.groupby(['Month', 'Channel']).agg({
+                                    'Net sales': 'sum',
+                                    'Gross profit': 'sum'
+                                }).reset_index()
+                                
+                                # Line chart - Net Sales
+                                line_sales = alt.Chart(monthly_channel).mark_line(point=True).encode(
+                                    x=alt.X('Month:N', title='Month'),
+                                    y=alt.Y('Net sales:Q', title='Net Sales (฿)'),
+                                    color=alt.Color('Channel:N', scale=alt.Scale(scheme='category10')),
+                                    tooltip=['Month:N', 'Channel:N', alt.Tooltip('Net sales:Q', format=',.2f')]
+                                ).properties(height=300, title='Net Sales Trend by Channel')
+                                
+                                st.altair_chart(line_sales, use_container_width=True)
+                                
+                                # Line chart - Gross Profit
+                                line_profit = alt.Chart(monthly_channel).mark_line(point=True).encode(
+                                    x=alt.X('Month:N', title='Month'),
+                                    y=alt.Y('Gross profit:Q', title='Gross Profit (฿)'),
+                                    color=alt.Color('Channel:N', scale=alt.Scale(scheme='set2')),
+                                    tooltip=['Month:N', 'Channel:N', alt.Tooltip('Gross profit:Q', format=',.2f')]
+                                ).properties(height=300, title='Gross Profit Trend by Channel')
+                                
+                                st.altair_chart(line_profit, use_container_width=True)
+                                
+                                # แสดงตารางแนวโน้ม
+                                pivot_sales = monthly_channel.pivot(index='Month', columns='Channel', values='Net sales').fillna(0)
+                                pivot_profit = monthly_channel.pivot(index='Month', columns='Channel', values='Gross profit').fillna(0)
+                                
+                                # คำนวณเปอร์เซ็นต์สำหรับแต่ละ Channel
+                                # สำหรับ Net Sales
+                                pivot_sales_pct = pivot_sales.div(pivot_sales.sum(axis=1), axis=0) * 100
+                                
+                                # รวมตาราง Value และ % เข้าด้วยกัน
+                                st.markdown("**📊 Net Sales by Month & Channel**")
+                                
+                                # สร้าง MultiIndex columns สำหรับแสดง Value และ %
+                                combined_sales = pd.DataFrame()
+                                for col in pivot_sales.columns:
+                                    combined_sales[f'{col} (฿)'] = pivot_sales[col]
+                                    combined_sales[f'{col} (%)'] = pivot_sales_pct[col]
+                                
+                                # เพิ่มคอลัมน์ Total
+                                combined_sales['Total (฿)'] = pivot_sales.sum(axis=1)
+                                
+                                st.dataframe(
+                                    combined_sales.style.format({
+                                        col: '{:,.2f}' if '(฿)' in col else '{:.1f}%' 
+                                        for col in combined_sales.columns
+                                    }),
+                                    use_container_width=True
+                                )
+                                
+                                # สำหรับ Gross Profit
+                                pivot_profit_pct = pivot_profit.div(pivot_profit.sum(axis=1), axis=0) * 100
+                                
+                                st.markdown("**📊 Gross Profit by Month & Channel**")
+                                
+                                # สร้าง MultiIndex columns สำหรับแสดง Value และ %
+                                combined_profit = pd.DataFrame()
+                                for col in pivot_profit.columns:
+                                    combined_profit[f'{col} (฿)'] = pivot_profit[col]
+                                    combined_profit[f'{col} (%)'] = pivot_profit_pct[col]
+                                
+                                # เพิ่มคอลัมน์ Total
+                                combined_profit['Total (฿)'] = pivot_profit.sum(axis=1)
+                                
+                                st.dataframe(
+                                    combined_profit.style.format({
+                                        col: '{:,.2f}' if '(฿)' in col else '{:.1f}%' 
+                                        for col in combined_profit.columns
+                                    }),
+                                    use_container_width=True
+                                )
+                            else:
+                                st.info("ไม่มีข้อมูล Date ที่ valid สำหรับแนวโน้ม")
+                        
+                        # ===== 3) Method2 Analysis =====
+                        st.markdown("---")
+                        st.markdown("#### 💵 Sales by Payment Method (Method2)")
+                        
+                        # สรุปยอดขายตาม Method2
+                        method2_summary = channel_method_data.groupby('Method2').agg({
+                            'Net sales': 'sum',
+                            'Gross profit': 'sum',
+                            'Receipt number': 'nunique' if 'Receipt number' in channel_method_data.columns else 'count',
+                            'Quantity': 'sum' if 'Quantity' in channel_method_data.columns else 'count'
+                        }).reset_index()
+                        method2_summary.columns = ['Method2', 'Net Sales', 'Gross Profit', 'Orders', 'Items']
+                        
+                        # คำนวณ Margin % และ %
+                        total_method_sales = method2_summary['Net Sales'].sum()
+                        method2_summary['Margin %'] = (method2_summary['Gross Profit'] / method2_summary['Net Sales'] * 100).round(2)
+                        method2_summary['% Sales'] = (method2_summary['Net Sales'] / total_method_sales * 100).round(2)
+                        method2_summary = method2_summary.sort_values('Net Sales', ascending=False)
+                        
+                        # แสดง Cards
+                        cols = st.columns(min(len(method2_summary), 4))
+                        
+                        for idx, row in method2_summary.iterrows():
+                            col_idx = idx % len(cols)
+                            with cols[col_idx]:
+                                emoji_map = {
+                                    'เงินสด': '💵',
+                                    'เงินโอน': '💳',
+                                    'Grab & Lineman': '🛵',
+                                    'TikTok': '🎵'
+                                }
+                                emoji = emoji_map.get(row['Method2'], '💰')
+                                
+                                st.markdown(f"""
+                                <div style='background-color: #f0f2f6; padding: 15px; 
+                                            border-radius: 8px; border-left: 4px solid #1f77b4; margin-bottom: 10px;'>
+                                    <h4 style='margin: 0;'>{emoji} {row['Method2']}</h4>
+                                    <p style='margin: 5px 0; font-size: 1.1em;'><strong>💰 {row['Net Sales']:,.0f} ฿</strong></p>
+                                    <p style='margin: 3px 0; color: #666; font-size: 0.9em;'>{row['% Sales']:.1f}% of total</p>
+                                    <p style='margin: 3px 0; color: #666; font-size: 0.9em;'>📋 {int(row['Orders']):,} orders</p>
+                                </div>
+                                """, unsafe_allow_html=True)
+                        
+                        # Pie Chart สำหรับ Method2
+                        pie_method2 = alt.Chart(method2_summary).mark_arc(innerRadius=60).encode(
+                            theta=alt.Theta('Net Sales:Q'),
+                            color=alt.Color('Method2:N', scale=alt.Scale(scheme='tableau10')),
+                            tooltip=['Method2:N', alt.Tooltip('Net Sales:Q', format=',.2f'), '% Sales:Q']
+                        ).properties(width=400, height=400, title='Sales Distribution by Payment Method')
+                        
+                        st.altair_chart(pie_method2, use_container_width=True)
+                        
+                        # แสดงตาราง Method2
+                        st.dataframe(
+                            method2_summary.style.format({
+                                'Net Sales': '{:,.2f}',
+                                'Gross Profit': '{:,.2f}',
+                                'Margin %': '{:.2f}%',
+                                '% Sales': '{:.2f}%',
+                                'Orders': '{:,.0f}',
+                                'Items': '{:,.0f}'
+                            }),
+                            use_container_width=True,
+                            hide_index=True
+                        )
+                        
+                        # ===== 4) Channel × Method2 Matrix =====
+                        st.markdown("---")
+                        st.markdown("#### 📊 Channel × Payment Method Matrix")
+                        
+                        # สร้าง Matrix
+                        matrix_data = channel_method_data.groupby(['Channel', 'Method2'])['Net sales'].sum().reset_index()
+                        pivot_matrix = matrix_data.pivot(index='Channel', columns='Method2', values='Net sales').fillna(0)
+                        
+                        # คำนวณ Total
+                        pivot_matrix['Total'] = pivot_matrix.sum(axis=1)
+                        pivot_matrix.loc['Total'] = pivot_matrix.sum()
+                        
+                        st.dataframe(
+                            pivot_matrix.style.format('{:,.2f}').background_gradient(cmap='YlOrRd', axis=None),
+                            use_container_width=True
+                        )
+                        
+                        # Heatmap
+                        matrix_melt = matrix_data.copy()
+                        heatmap = alt.Chart(matrix_melt).mark_rect().encode(
+                            x=alt.X('Method2:N', title='Payment Method'),
+                            y=alt.Y('Channel:N', title='Channel'),
+                            color=alt.Color('Net sales:Q', scale=alt.Scale(scheme='blues'), title='Net Sales (฿)'),
+                            tooltip=['Channel:N', 'Method2:N', alt.Tooltip('Net sales:Q', format=',.2f')]
+                        ).properties(width=500, height=300, title='Sales Heatmap: Channel × Payment Method')
+                        
+                        st.altair_chart(heatmap, use_container_width=True)
+                        
+                    else:
+                        st.info("📊 ไม่มีข้อมูล Channel/Method2 ที่ระบุได้สำหรับการวิเคราะห์")
+                else:
+                    st.warning("⚠️ ไม่มีข้อมูล Channel และ Method2 - กรุณา upload Receipts data file")
+
                 # ===== 🥧 Net Sales by Category =====
                 st.markdown("#### 🥧 Net Sales by Category")
                 
@@ -1654,7 +2027,10 @@ if st.session_state.get("ran") and uploaded_sales and uploaded_stock:
 
 
                 # Pareto 80/20
-                st.markdown("#### 🍰 Pareto Analysis (80/20)")
+                # 📊 Pareto Analysis - Combined View Chart
+                st.markdown("#### 📊 Pareto Analysis - Combined View")
+                
+                # เตรียมข้อมูลพื้นฐาน
                 pareto = sku_agg.sort_values("Net_sales", ascending=False).reset_index(drop=True)
                 pareto["cum_sales"] = pareto["Net_sales"].cumsum()
                 total_sales = pareto["Net_sales"].sum()
@@ -1664,58 +2040,159 @@ if st.session_state.get("ran") and uploaded_sales and uploaded_stock:
                 top_20pct_n = max(int(np.ceil(0.2*len(pareto))), 1)
                 top_20_share = pareto.loc[:top_20pct_n-1, "Net_sales"].sum() / total_sales if total_sales>0 else 0
 
-                cP1, cP2 = st.columns([2,1])
-                with cP2:
-                    st.metric("สัดส่วนยอดขายจาก Top 20% SKU", f"{top_20_share*100:,.1f}%")
-                    st.caption("ดูว่ากฎ 80/20 ถือจริงไหมในข้อมูลที่เลือก")
-                with cP1:
-                    base = alt.Chart(pareto).encode(x=alt.X("sku_share:Q", title="สัดส่วนจำนวน SKU สะสม"),
-                                                    y=alt.Y("cum_share:Q", title="สัดส่วนยอดขายสะสม"))
-                    line = base.mark_line()
-                    points = base.mark_point()
-                    rule80 = alt.Chart(pd.DataFrame({"y":[0.8]})).mark_rule(strokeDash=[4,4]).encode(y="y:Q")
-                    rule20 = alt.Chart(pd.DataFrame({"x":[0.2]})).mark_rule(strokeDash=[4,4]).encode(x="x:Q")
-                    st.altair_chart(line + points + rule80 + rule20, use_container_width=True)
+                # จัดอันดับตามกำไร
+                profit_ranks = sku_agg.sort_values("Gross_profit", ascending=False).reset_index(drop=True)
+                profit_ranks["Profit_Rank"] = np.arange(1, len(profit_ranks)+1)
+                profit_rank_dict = dict(zip(profit_ranks["SKU"], profit_ranks["Profit_Rank"]))
+                top_20pct_profit_n = max(int(np.ceil(0.2*len(profit_ranks))), 1)
+                
+                # รวมข้อมูลทั้งสองมุมมอง
+                pareto_combined = sku_agg.copy()
+                pareto_combined = pareto_combined.sort_values("Net_sales", ascending=False).reset_index(drop=True)
+                pareto_combined["sku_rank"] = np.arange(1, len(pareto_combined)+1)
+                pareto_combined["sku_share"] = pareto_combined["sku_rank"] / max(len(pareto_combined),1)
+                
+                # คำนวณสัดส่วนสะสมสำหรับทั้งสองตัวชี้วัด
+                pareto_combined["cum_sales"] = pareto_combined["Net_sales"].cumsum()
+                pareto_combined["cum_profit"] = pareto_combined["Gross_profit"].cumsum()
+                pareto_combined["cum_sales_share"] = pareto_combined["cum_sales"] / total_sales if total_sales > 0 else 0
+                total_profit = pareto_combined["Gross_profit"].sum()
+                pareto_combined["cum_profit_share"] = pareto_combined["cum_profit"] / total_profit if total_profit > 0 else 0
+                
+                # คำนวณสัดส่วนกำไรจาก Top 20%
+                top_20_profit_share = pareto_combined.loc[:top_20pct_profit_n-1, "Gross_profit"].sum() / total_profit if total_profit>0 else 0
 
-                # แสดงตารางรายละเอียด Pareto Analysis
-                st.markdown("##### 📊 รายละเอียด Pareto Analysis")
+                # สร้างกราฟซ้อนกัน
+                base_combined = alt.Chart(pareto_combined)
                 
-                # สร้างตารางข้อมูล Pareto พร้อมการจัดกลุ่ม
-                pareto_display = pareto.copy()
-                
-                # เพิ่มคอลัมน์สำหรับแสดงผล
-                pareto_display["Rank"] = pareto_display["sku_rank"]
-                
-                # คำนวณเปอร์เซ็นต์แยกตัว และสะสม
-                pareto_display["Individual_%"] = (pareto_display["Net_sales"] / total_sales * 100).round(2)
-                pareto_display["Cumulative_%"] = (pareto_display["cum_share"] * 100).round(2)
-                
-                pareto_display["Group"] = np.where(
-                    pareto_display["sku_rank"] <= top_20pct_n, 
-                    "🔥 Top 20% (High Impact)", 
-                    "📈 Bottom 80% (Low Impact)"
+                # เส้นกราฟยอดขาย
+                sales_line = base_combined.mark_line(color='blue', strokeWidth=3).encode(
+                    x=alt.X("sku_share:Q", title="สัดส่วนจำนวน SKU สะสม"),
+                    y=alt.Y("cum_sales_share:Q", title="สัดส่วนสะสม")
                 )
                 
-                # เลือกคอลัมน์ที่จะแสดง
-                display_cols = ["Rank", "SKU", "Label", "Category_disp", "Net_sales", "Gross_profit", 
-                               "Quantity", "Individual_%", "Cumulative_%", "Group"]
+                # เส้นกราฟกำไร
+                profit_line = base_combined.mark_line(color='green', strokeWidth=3, strokeDash=[5,5]).encode(
+                    x=alt.X("sku_share:Q", title="สัดส่วนจำนวน SKU สะสม"),
+                    y=alt.Y("cum_profit_share:Q", title="สัดส่วนสะสม")
+                )
                 
-                # กรองคอลัมน์ที่มีจริงในข้อมูล
-                available_cols = [col for col in display_cols if col in pareto_display.columns]
+                # เส้นอ้างอิง 80/20
+                rule80_combined = alt.Chart(pd.DataFrame({"y":[0.8]})).mark_rule(strokeDash=[4,4], color='red').encode(y="y:Q")
+                rule20_combined = alt.Chart(pd.DataFrame({"x":[0.2]})).mark_rule(strokeDash=[4,4], color='red').encode(x="x:Q")
                 
-                # แสดงตารางแบบ interactive
-                pareto_table = pareto_display[available_cols].copy()
+                combined_chart = sales_line + profit_line + rule80_combined + rule20_combined
                 
-                # Tab สำหรับแสดงข้อมูลแยกตามกลุ่ม
-                tab_all, tab_top20, tab_bottom80 = st.tabs(["📋 All Items", "🔥 Top 20%", "📈 Bottom 80%"])
+                cP5, cP6 = st.columns([2,1])
+                with cP5:
+                    st.altair_chart(combined_chart, use_container_width=True)
+                with cP6:
+                    st.markdown("**🔵 เส้นทึบ**: Net Sales")
+                    st.markdown("**🟢 เส้นประ**: Gross Profit")
+                    st.markdown("**🔴 เส้นอ้างอิง**: 80/20 Rule")
+                    st.write("")
+                    st.metric("Top 20% Net Sales", f"{top_20_share*100:,.1f}%")
+                    st.metric("Top 20% Gross Profit", f"{top_20_profit_share*100:,.1f}%")
+                    
+                    # เปรียบเทียบความแตกต่าง
+                    diff_percentage = abs(top_20_share - top_20_profit_share) * 100
+                    if diff_percentage < 5:
+                        st.success(f"📈 แนวโน้มคล้ายกัน (ต่าง {diff_percentage:.1f}%)")
+                    elif diff_percentage < 10:
+                        st.warning(f"⚠️ แนวโน้มต่างเล็กน้อย (ต่าง {diff_percentage:.1f}%)")
+                    else:
+                        st.error(f"🚨 แนวโน้มต่างมาก (ต่าง {diff_percentage:.1f}%)")
+
+                # 📊 รายละเอียด Pareto Analysis
+                st.markdown("##### 📊 รายละเอียด Pareto Analysis")
+                
+                # สร้างตารางรวม
+                analysis_table = pareto.copy()
+                analysis_table["Sales_Rank"] = analysis_table["sku_rank"]
+                analysis_table["Profit_Rank"] = analysis_table["SKU"].map(profit_rank_dict)
+                
+                # สร้างคอลัมน์ Top20 Tags แสดง rank
+                def create_top20_sales_display(row):
+                    if row["Sales_Rank"] <= top_20pct_n:
+                        return f"💰 Top20-Sales ({row['Sales_Rank']})"
+                    else:
+                        return ""
+                        
+                def create_top20_profit_display(row):
+                    if row["Profit_Rank"] <= top_20pct_profit_n:
+                        return f"🏆 Top20-Profit ({row['Profit_Rank']})"
+                    else:
+                        return ""
+
+                analysis_table["Top20_Sales"] = analysis_table.apply(create_top20_sales_display, axis=1)
+                analysis_table["Top20_Profit"] = analysis_table.apply(create_top20_profit_display, axis=1)
+                
+                # คำนวณเปอร์เซ็นต์
+                analysis_table["Sales_Individual_%"] = (analysis_table["Net_sales"] / total_sales * 100).round(2)
+                analysis_table["Profit_Individual_%"] = (analysis_table["Gross_profit"] / total_profit * 100).round(2)
+                analysis_table["Cumulative_%"] = (analysis_table["cum_share"] * 100).round(2)
+                
+                # คำนวณ Cumulative สำหรับ Profit (เรียงตาม Profit_Rank)
+                profit_sorted = analysis_table.sort_values("Profit_Rank").copy()
+                profit_sorted["cum_profit"] = profit_sorted["Gross_profit"].cumsum()
+                profit_sorted["Profit_Cumulative_%"] = (profit_sorted["cum_profit"] / total_profit * 100).round(2)
+                profit_cumulative_dict = dict(zip(profit_sorted["SKU"], profit_sorted["Profit_Cumulative_%"]))
+                analysis_table["Profit_Cumulative_%"] = analysis_table["SKU"].map(profit_cumulative_dict)
+                analysis_table = pareto.copy()
+                analysis_table["Sales_Rank"] = analysis_table["sku_rank"]
+                analysis_table["Profit_Rank"] = analysis_table["SKU"].map(profit_rank_dict)
+                
+                # สร้างคอลัมน์ Top20 Tags แสดง rank
+                def create_top20_sales_display(row):
+                    if row["Sales_Rank"] <= top_20pct_n:
+                        return f"💰 Top20-Sales ({row['Sales_Rank']})"
+                    else:
+                        return ""
+                        
+                def create_top20_profit_display(row):
+                    if row["Profit_Rank"] <= top_20pct_profit_n:
+                        return f"🏆 Top20-Profit ({row['Profit_Rank']})"
+                    else:
+                        return ""
+
+                analysis_table["Top20_Sales"] = analysis_table.apply(create_top20_sales_display, axis=1)
+                analysis_table["Top20_Profit"] = analysis_table.apply(create_top20_profit_display, axis=1)
+                
+                # คำนวณเปอร์เซ็นต์
+                analysis_table["Sales_Individual_%"] = (analysis_table["Net_sales"] / total_sales * 100).round(2)
+                analysis_table["Profit_Individual_%"] = (analysis_table["Gross_profit"] / total_profit * 100).round(2)
+                analysis_table["Cumulative_%"] = (analysis_table["cum_share"] * 100).round(2)
+                
+                # คำนวณ Cumulative สำหรับ Profit (เรียงตาม Profit_Rank)
+                profit_sorted = analysis_table.sort_values("Profit_Rank").copy()
+                profit_sorted["cum_profit"] = profit_sorted["Gross_profit"].cumsum()
+                profit_sorted["Profit_Cumulative_%"] = (profit_sorted["cum_profit"] / total_profit * 100).round(2)
+                profit_cumulative_dict = dict(zip(profit_sorted["SKU"], profit_sorted["Profit_Cumulative_%"]))
+                analysis_table["Profit_Cumulative_%"] = analysis_table["SKU"].map(profit_cumulative_dict)
+                
+                # เลือกคอลัมน์สำหรับแสดง (รวม Profit_Rank ด้วย)
+                display_cols = ["Sales_Rank", "Profit_Rank", "SKU", "Label", "Category_disp", "Net_sales", "Gross_profit", "Quantity",
+                               "Top20_Sales", "Top20_Profit", 
+                               "Sales_Individual_%", "Profit_Individual_%", "Cumulative_%", "Profit_Cumulative_%"]
+                
+                final_table = analysis_table[display_cols].copy()
+                
+                # สร้าง 3 tabs
+                tab_all, tab_top_sales, tab_top_profit = st.tabs(["📋 All Items", "💰 Top20-Sales", "🏆 Top20-Profit"])
                 
                 with tab_all:
+                    # สำหรับ tab All Items ไม่ต้องแสดง Profit_Rank และ Profit_Cumulative_%
+                    all_display_cols = ["Sales_Rank", "SKU", "Label", "Category_disp", "Net_sales", "Gross_profit", "Quantity",
+                                       "Top20_Sales", "Top20_Profit", 
+                                       "Sales_Individual_%", "Profit_Individual_%", "Cumulative_%"]
+                    
                     st.dataframe(
-                        pareto_table.style.format({
+                        final_table[all_display_cols].style.format({
                             'Net_sales': '{:,.2f}',
                             'Gross_profit': '{:,.2f}',
                             'Quantity': '{:,.0f}',
-                            'Individual_%': '{:.2f}%',
+                            'Sales_Individual_%': '{:.2f}%',
+                            'Profit_Individual_%': '{:.2f}%',
                             'Cumulative_%': '{:.2f}%'
                         }),
                         use_container_width=True,
@@ -1723,47 +2200,72 @@ if st.session_state.get("ran") and uploaded_sales and uploaded_stock:
                     )
                     
                     # ปุ่มดาวน์โหลด
-                    csv_pareto = pareto_table.to_csv(index=False)
+                    csv_all = final_table[all_display_cols].to_csv(index=False)
                     st.download_button(
-                        label="📥 Download Pareto Analysis",
-                        data=csv_pareto,
-                        file_name="pareto_analysis.csv",
+                        label="📥 Download All Analysis",
+                        data=csv_all,
+                        file_name="pareto_analysis_all.csv",
                         mime="text/csv"
                     )
                 
-                with tab_top20:
-                    top_20_items = pareto_table[pareto_table["Group"] == "🔥 Top 20% (High Impact)"]
-                    st.write(f"**จำนวน SKU: {len(top_20_items)} รายการ ({(len(top_20_items)/len(pareto_table)*100):.1f}% ของ SKU ทั้งหมด)**")
+                with tab_top_sales:
+                    top_sales_items = final_table[final_table["Top20_Sales"].str.len() > 0].copy()
+                    st.write(f"**จำนวน SKU: {len(top_sales_items)} รายการ ({(len(top_sales_items)/len(final_table)*100):.1f}% ของ SKU ทั้งหมด)**")
                     st.write(f"**สัดส่วนยอดขาย: {top_20_share*100:.1f}% ของยอดขายรวม**")
                     
+                    # สำหรับ tab Top20-Sales ไม่ต้องแสดง Profit_Rank และ Profit_Cumulative_%
+                    sales_display_cols = ["Sales_Rank", "SKU", "Label", "Category_disp", "Net_sales", "Gross_profit", "Quantity",
+                                         "Top20_Sales", "Top20_Profit", 
+                                         "Sales_Individual_%", "Profit_Individual_%", "Cumulative_%"]
+                    
                     st.dataframe(
-                        top_20_items.style.format({
+                        top_sales_items[sales_display_cols].style.format({
                             'Net_sales': '{:,.2f}',
                             'Gross_profit': '{:,.2f}',
                             'Quantity': '{:,.0f}',
-                            'Individual_%': '{:.2f}%',
+                            'Sales_Individual_%': '{:.2f}%',
+                            'Profit_Individual_%': '{:.2f}%',
                             'Cumulative_%': '{:.2f}%'
                         }),
                         use_container_width=True
                     )
                 
-                with tab_bottom80:
-                    bottom_80_items = pareto_table[pareto_table["Group"] == "📈 Bottom 80% (Low Impact)"]
-                    bottom_80_sales_share = (1 - top_20_share) * 100
-                    st.write(f"**จำนวน SKU: {len(bottom_80_items)} รายการ ({(len(bottom_80_items)/len(pareto_table)*100):.1f}% ของ SKU ทั้งหมด)**")
-                    st.write(f"**สัดส่วนยอดขาย: {bottom_80_sales_share:.1f}% ของยอดขายรวม**")
+                with tab_top_profit:
+                    top_profit_items = final_table[final_table["Top20_Profit"].str.len() > 0].copy()
+                    
+                    # เรียงใหม่ตาม Profit_Rank สำหรับ tab Top20-Profit
+                    top_profit_items = top_profit_items.sort_values("Profit_Rank").reset_index(drop=True)
+                    
+                    # เปลี่ยนคอลัมน์แรกเป็น Profit_Rank สำหรับ tab นี้ และใช้ Profit_Cumulative_%
+                    profit_display_cols = ["Profit_Rank", "SKU", "Label", "Category_disp", "Net_sales", "Gross_profit", "Quantity",
+                                          "Top20_Sales", "Top20_Profit", 
+                                          "Sales_Individual_%", "Profit_Individual_%", "Profit_Cumulative_%"]
+                    
+                    top_20_profit_share = profit_ranks.loc[:top_20pct_profit_n-1, "Gross_profit"].sum() / total_profit if total_profit>0 else 0
+                    st.write(f"**จำนวน SKU: {len(top_profit_items)} รายการ ({(len(top_profit_items)/len(final_table)*100):.1f}% ของ SKU ทั้งหมด)**")
+                    st.write(f"**สัดส่วนกำไร: {top_20_profit_share*100:.1f}% ของกำไรรวม**")
                     
                     st.dataframe(
-                        bottom_80_items.style.format({
+                        top_profit_items[profit_display_cols].style.format({
                             'Net_sales': '{:,.2f}',
                             'Gross_profit': '{:,.2f}',
                             'Quantity': '{:,.0f}',
-                            'Individual_%': '{:.2f}%',
-                            'Cumulative_%': '{:.2f}%'
+                            'Sales_Individual_%': '{:.2f}%',
+                            'Profit_Individual_%': '{:.2f}%',
+                            'Profit_Cumulative_%': '{:.2f}%'
                         }),
-                        use_container_width=True,
-                        height=400
+                        use_container_width=True
                     )
+                
+                st.markdown("""
+                **คำอธิบาย:**
+                - **💰 Top20-Sales (rank)**: แสดงอันดับยอดขายหาก SKU นี้อยู่ใน Top 20%
+                - **🏆 Top20-Profit (rank)**: แสดงอันดับกำไรหาก SKU นี้อยู่ใน Top 20%
+                - **Sales_Rank**: อันดับตามยอดขาย (tab All Items และ Top20-Sales)
+                - **Profit_Rank**: อันดับตามกำไร (tab Top20-Profit)
+                - **Cumulative_%**: ยอดสะสมตามยอดขาย (tab All Items และ Top20-Sales)
+                - **Profit_Cumulative_%**: ยอดสะสมตามกำไร (tab Top20-Profit)
+                """)
 
                 # ===== 3) Margin Analysis =====
                 st.markdown("### 3) กำไรและ Margin Analysis")
@@ -2274,27 +2776,108 @@ if st.session_state.get("ran") and uploaded_sales and uploaded_stock:
                     st.subheader("👤 Customer Portfolio")
                     
                     try:
-                        # อ่านไฟล์ first_time.csv หากมี
-                        first_time_data = None
-                        try:
-                            first_time_path = "first_time.csv"
-                            first_time_data = pd.read_csv(first_time_path)
-                            
-                            # สร้าง customer_key สำหรับ first_time_data
-                            if 'Customer name' in first_time_data.columns and 'Customer contacts' in first_time_data.columns:
-                                first_time_data['customer_key'] = (
-                                    first_time_data['Customer name'].astype(str).str.strip() + " | " + 
-                                    first_time_data['Customer contacts'].astype(str).str.strip()
-                                ).str.strip(" |")
+                        # อ่านไฟล์ customer data และสร้าง customer_key
+                        customers_data = None
+                        if uploaded_customers is not None:
+                            try:
+                                # ตรวจสอบขนาดไฟล์ก่อน
+                                uploaded_customers.seek(0)
+                                content = uploaded_customers.read()
                                 
-                        except FileNotFoundError:
-                            st.info("ℹ️ ไม่พบไฟล์ first_time.csv - จะไม่แสดงข้อมูลวันที่มาเป็นลูกค้าครั้งแรก")
+                                if len(content) == 0:
+                                    st.warning("⚠️ ไฟล์ customer data ว่างเปล่า")
+                                    customers_data = None
+                                else:
+                                    # Reset file pointer และลองอ่านไฟล์
+                                    uploaded_customers.seek(0)
+                                    
+                                    # ลองอ่านไฟล์ด้วยพารามิเตอร์ต่างๆ
+                                    try:
+                                        customers_data = pd.read_csv(uploaded_customers)
+                                    except:
+                                        # ลองด้วย encoding อื่น
+                                        uploaded_customers.seek(0)
+                                        try:
+                                            customers_data = pd.read_csv(uploaded_customers, encoding='utf-8-sig')
+                                        except:
+                                            uploaded_customers.seek(0)
+                                            try:
+                                                customers_data = pd.read_csv(uploaded_customers, encoding='cp1252')
+                                            except:
+                                                uploaded_customers.seek(0)
+                                                customers_data = pd.read_csv(uploaded_customers, sep=None, engine='python')
+                                    
+                                    # ตรวจสอบว่าไฟล์มีข้อมูลหรือไม่
+                                    if customers_data.empty or len(customers_data.columns) == 0:
+                                        st.warning("⚠️ ไฟล์ customer data ไม่มีข้อมูลหรือไม่มีคอลัมน์")
+                                        customers_data = None
+                                    else:
+                                        st.success(f"✅ โหลดไฟล์ customer data สำเร็จ - {len(customers_data):,} records")
+                                        
+                                        # สร้าง customer_key จาก Customer name + Phone (เหมือนใน sales data)
+                                        if 'Customer name' in customers_data.columns and 'Phone' in customers_data.columns:
+                                            customers_data['customer_key'] = (
+                                                customers_data['Customer name'].astype(str).str.strip() + " | " + 
+                                                customers_data['Phone'].astype(str).str.strip()
+                                            ).str.strip(" |")
+                                            st.success(f"✅ โหลดไฟล์ customer data สำเร็จ - {len(customers_data)} records")
+                                        else:
+                                            st.warning("⚠️ ไฟล์ customer data ต้องมีคอลัมน์ 'Customer name' และ 'Phone'")
+                                            st.info(f"คอลัมน์ที่พบ: {list(customers_data.columns)}")
+                                            customers_data = None
+                                        
+                            except pd.errors.EmptyDataError:
+                                st.error("❌ ไฟล์ customer data ว่างเปล่าหรือไม่มีข้อมูล")
+                                customers_data = None
+                            except pd.errors.ParserError as e:
+                                st.error(f"❌ ไฟล์ customer data มีรูปแบบไม่ถูกต้อง")
+                                with st.expander("🔧 รายละเอียดข้อผิดพลาด", expanded=True):
+                                    st.code(str(e))
+                                    st.markdown("""
+                                    **💡 วิธีแก้ไข:**
+                                    1. ตรวจสอบว่าไฟล์เป็น CSV ที่ถูกต้อง
+                                    2. ลองเปิดไฟล์ด้วย Excel และ Save As เป็น CSV (UTF-8) ใหม่
+                                    3. ตรวจสอบว่ามีเครื่องหมาย comma หรือ semicolon ที่ผิดปกติ
+                                    4. ลบบรรทัดว่างที่ด้านบนหรือด้านล่างของไฟล์
+                                    """)
+                                customers_data = None
+                            except Exception as e:
+                                if "No columns to parse from file" in str(e):
+                                    st.error("❌ ไฟล์ customer data ไม่มีคอลัมน์หรือรูปแบบไม่ถูกต้อง")
+                                    with st.expander("� วิธีแก้ไขปัญหา 'No columns to parse'", expanded=True):
+                                        st.markdown("""
+                                        **สาเหตุที่เป็นไปได้:**
+                                        1. **ไฟล์ว่างเปล่า** - ไม่มีข้อมูลเลย
+                                        2. **ไม่มีหัวคอลัมน์** - บรรทัดแรกไม่ใช่ชื่อคอลัมน์
+                                        3. **Encoding ผิด** - ไฟล์ใช้ encoding ที่ไม่ใช่ UTF-8
+                                        4. **Delimiter ผิด** - ใช้ semicolon (;) แทน comma (,)
+                                        5. **มีอักขระพิเศษ** - BOM หรืออักขระที่มองไม่เห็น
+                                        
+                                        **วิธีแก้ไข:**
+                                        1. เปิดไฟล์ด้วย Notepad แล้วดูว่ามีข้อมูลหรือไม่
+                                        2. ตรวจสอบว่าบรรทัดแรกมีชื่อคอลัมน์
+                                        3. ลองบันทึกใหม่เป็น CSV (UTF-8) จาก Excel
+                                        4. ตรวจสอบว่าใช้ comma (,) เป็นตัวคั่น
+                                        """)
+                                else:
+                                    st.error(f"❌ เกิดข้อผิดพลาดในการอ่านไฟล์ customer data")
+                                    with st.expander("🔧 รายละเอียดข้อผิดพลาด", expanded=True):
+                                        st.code(str(e))
+                                customers_data = None
                         
                         # สร้าง customer_key list สำหรับ filter เรียงตาม Net Sales
-                        if not customer_data_filtered.empty:
-                            # คำนวณ Net Sales รวมของแต่ละลูกค้า
-                            customer_net_sales = customer_data_filtered.groupby('customer_key')['Net sales'].sum().reset_index()
-                            customer_net_sales = customer_net_sales.sort_values('Net sales', ascending=False)
+                        # ใช้ customers_data เฉพาะเพื่อเข้าถึง First visit, Last visit 
+                        # แต่ใช้ customer_data (จาก sales) สำหรับคำนวณ Net Sales
+                        if customers_data is not None and not customers_data.empty and 'customer_key' in customers_data.columns:
+                            # ใช้ customer_data (จาก sales) สำหรับคำนวณ Net Sales และสร้างรายการลูกค้า
+                            if 'customer_key' in customer_data.columns and 'Net sales' in customer_data.columns:
+                                # กรองข้อมูลลูกค้าที่มี customer_key ที่ไม่ใช่ "Unknown"
+                                valid_sales_data = customer_data[customer_data['customer_key'] != 'Unknown'].copy()
+                                
+                                if not valid_sales_data.empty:
+                                    # คำนวณ Net Sales รวมของแต่ละลูกค้า (จาก sales data)
+                                    customer_net_sales = valid_sales_data.groupby('customer_key')['Net sales'].sum().reset_index()
+                                    customer_net_sales = customer_net_sales.sort_values('Net sales', ascending=False)
                             
                             # สร้างรายการลูกค้าพร้อม Net Sales สำหรับแสดงใน selectbox
                             customer_display_list = []
@@ -2319,518 +2902,1013 @@ if st.session_state.get("ran") and uploaded_sales and uploaded_stock:
                                 key="customer_portfolio_filter"
                             )
                             
-                            # แปลงกลับเป็น customer_key
-                            if selected_customer_display != "เลือกลูกค้า...":
-                                selected_customer = display_to_key[selected_customer_display]
-                            else:
-                                selected_customer = "เลือกลูกค้า..."
-                            
-                            if selected_customer != "เลือกลูกค้า...":
-                                # กรองข้อมูลของลูกค้าที่เลือก
-                                customer_sales = customer_data_filtered[customer_data_filtered['customer_key'] == selected_customer].copy()
+                            # ถ้ามีข้อมูลลูกค้า ให้ดำเนินการต่อ
+                            if 'customer_display_list' in locals() and len(customer_display_list) > 0:
+                                # แปลงกลับเป็น customer_key
+                                if selected_customer_display != "เลือกลูกค้า...":
+                                    selected_customer = display_to_key[selected_customer_display]
+                                else:
+                                    selected_customer = "เลือกลูกค้า..."
                                 
-                                if not customer_sales.empty:
-                                    # สร้าง Cate_brand column (เหมือนในโค้ดก่อนหน้า)
-                                    if 'Brand' in customer_sales.columns and 'Category_disp' in customer_sales.columns:
-                                        customer_sales['Cate_brand'] = (
-                                            customer_sales['Category_disp'].astype(str).str.strip() + " [" + 
-                                            customer_sales['Brand'].astype(str).str.lower() + "]"
-                                        )
-                                    else:
-                                        customer_sales['Cate_brand'] = customer_sales.get('Category_disp', 'Unknown')
+                                if selected_customer != "เลือกลูกค้า...":
+                                    # กรองข้อมูลของลูกค้าที่เลือก
+                                    customer_sales = valid_sales_data[valid_sales_data['customer_key'] == selected_customer].copy()
                                     
-                                    # แสดงข้อมูลสรุปลูกค้า
-                                    col1, col2, col3 = st.columns(3)
-                                    
-                                    with col1:
-                                        # วันที่มาเป็นลูกค้าครั้งแรก
-                                        first_visit = "ไม่ระบุ"
-                                        if first_time_data is not None and 'customer_key' in first_time_data.columns:
-                                            first_visit_row = first_time_data[first_time_data['customer_key'] == selected_customer]
-                                            if not first_visit_row.empty and 'First visit' in first_visit_row.columns:
-                                                first_visit = first_visit_row['First visit'].iloc[0]
-                                        
-                                        st.metric("📅 First Visit", str(first_visit))
-                                        
-                                        # Total Sales
-                                        total_sales = customer_sales['Net sales'].sum()
-                                        st.metric("💰 Total Sales", f"{total_sales:,.2f}")
-                                    
-                                    with col2:
-                                        # Total Orders
-                                        total_orders = customer_sales['Receipt number'].nunique() if 'Receipt number' in customer_sales.columns else len(customer_sales)
-                                        st.metric("🧾 Total Orders", f"{total_orders:,}")
-                                        
-                                        # Total Profit
-                                        total_profit = customer_sales['Gross profit'].sum() if 'Gross profit' in customer_sales.columns else 0
-                                        st.metric("💵 Total Profit", f"{total_profit:,.2f}")
-                                    
-                                    with col3:
-                                        # Avg per Bill
-                                        avg_per_bill = total_sales / total_orders if total_orders > 0 else 0
-                                        st.metric("📊 Avg per Bill", f"{avg_per_bill:,.2f}")
-                                        
-                                        # Profit Margin %
-                                        profit_margin = (total_profit / total_sales * 100) if total_sales > 0 else 0
-                                        st.metric("📈 Profit Margin", f"{profit_margin:.1f}%")
-                                    
-                                    # Pet Type Prediction Card
-                                    st.markdown("---")
-                                    st.markdown("#### 🐾 Pet Type Prediction")
-                                    
-                                    # วิเคราะห์ Category ที่ซื้อเพื่อคาดการณ์ประเภทสัตว์เลี้ยง
-                                    # ตรวจสอบคำหลัก cat และ dog ในชื่อ category
-                                    
-                                    # ตรวจสอบว่ามีการซื้อสินค้าที่เกี่ยวข้องกับ cat หรือ dog หรือไม่
-                                    has_cat = False
-                                    has_dog = False
-                                    cat_count = 0
-                                    dog_count = 0
-                                    
-                                    for category in customer_sales['Category_disp'].astype(str).str.lower():
-                                        # ตรวจสอบคำ "cat" ในชื่อ category
-                                        if 'cat' in category:
-                                            has_cat = True
-                                            cat_count += 1
-                                        # ตรวจสอบคำ "dog" ในชื่อ category
-                                        if 'dog' in category:
-                                            has_dog = True
-                                            dog_count += 1
-                                    
-                                    # คำนวณเปอร์เซ็นต์
-                                    total_purchases = len(customer_sales)
-                                    cat_percentage = (cat_count / total_purchases * 100) if total_purchases > 0 else 0
-                                    dog_percentage = (dog_count / total_purchases * 100) if total_purchases > 0 else 0
-                                    
-                                    # กำหนดการคาดการณ์ตามลอจิกใหม่
-                                    prediction = ""
-                                    icon = ""
-                                    
-                                    if has_cat and has_dog:
-                                        # ถ้าซื้อทั้ง Cat และ Dog
-                                        prediction = "เลี้ยงทั้งแมว และ สุนัข"
-                                        icon = "🐱🐶"
-                                    elif has_cat:
-                                        # ถ้าซื้อแค่ Cat
-                                        prediction = "เลี้ยงแมว"
-                                        icon = "�"
-                                    elif has_dog:
-                                        # ถ้าซื้อแค่ Dog
-                                        prediction = "เลี้ยงสุนัข"
-                                        icon = "🐶"
-                                    else:
-                                        # ไม่มีข้อมูลชัดเจน
-                                        prediction = "ไม่สามารถระบุได้"
-                                        icon = "❓"
-                                    
-                                    # แสดง Card
-                                    col_pet1, col_pet2 = st.columns(2)
-                                    
-                                    with col_pet1:
-                                        # สร้างสไตล์ตาม prediction
-                                        if has_cat and has_dog:
-                                            st.success(f"""
-                                            **{icon} Pet Type Prediction**
-                                            
-                                            **คาดการณ์:** {prediction}
-                                            
-                                            ลูกค้าคนนี้น่าจะเลี้ยงทั้งแมวและสุนัข! 🏠
-                                            """)
-                                        elif has_cat:
-                                            st.info(f"""
-                                            **{icon} Pet Type Prediction**
-                                            
-                                            **คาดการณ์:** {prediction}
-                                            
-                                            ลูกค้าคนนี้น่าจะเป็นทาสแมว! 😸
-                                            """)
-                                        elif has_dog:
-                                            st.info(f"""
-                                            **{icon} Pet Type Prediction**
-                                            
-                                            **คาดการณ์:** {prediction}
-                                            
-                                            ลูกค้าคนนี้น่าจะรักสุนัข! 🐕
-                                            """)
+                                    if not customer_sales.empty:
+                                        # สร้าง Cate_brand column (เหมือนในโค้ดก่อนหน้า)
+                                        if 'Brand' in customer_sales.columns and 'Category_disp' in customer_sales.columns:
+                                            customer_sales['Cate_brand'] = (
+                                                customer_sales['Category_disp'].astype(str).str.strip() + " [" + 
+                                                customer_sales['Brand'].astype(str).str.lower() + "]"
+                                            )
                                         else:
-                                            st.warning(f"""
-                                            **{icon} Pet Type Prediction**
+                                            customer_sales['Cate_brand'] = customer_sales.get('Category_disp', 'Unknown')
+                                        
+                                        # แสดงข้อมูลสรุปลูกค้า
+                                        # บรรทัดแรก: First Visit | Last Visit | Customer Status
+                                        col1, col2, col3 = st.columns(3)
+                                        
+                                        with col1:
+                                            # วันที่มาเป็นลูกค้าครั้งแรก จาก Customer data file
+                                            first_visit = "ไม่ระบุ"
                                             
-                                            **คาดการณ์:** {prediction}
-                                            
-                                            ยังไม่มีข้อมูลที่ชัดเจน
-                                            """)
-                                    
-                                    with col_pet2:
-                                        st.info(f"""
-                                        **📊 Purchase Analysis**
-                                        
-                                        **Cat Products:** {cat_count} รายการ ({cat_percentage:.1f}%)
-                                        
-                                        **Dog Products:** {dog_count} รายการ ({dog_percentage:.1f}%)
-                                        
-                                        **Total Items:** {total_purchases} รายการ
-                                        """)
-                                    
-                                    # Visit Frequency Analysis
-                                    st.markdown("---")
-                                    st.markdown("#### 📅 Visit Frequency Analysis")
-                                    
-                                    # วิเคราะห์ความถี่ในการเข้าร้าน
-                                    if 'Date' in customer_sales.columns and 'Receipt number' in customer_sales.columns:
-                                        # หาวันที่ไม่ซ้ำกันของการซื้อแต่ละใบเสร็จ
-                                        receipt_dates = customer_sales.groupby('Receipt number')['Date'].first().reset_index()
-                                        receipt_dates['Date'] = pd.to_datetime(receipt_dates['Date'], errors='coerce')
-                                        receipt_dates = receipt_dates.dropna(subset=['Date'])
-                                        receipt_dates = receipt_dates.sort_values('Date')
-                                        
-                                        if len(receipt_dates) >= 2:
-                                            # คำนวณระยะห่างระหว่างการเข้าร้าน (วัน)
-                                            visit_gaps = []
-                                            for i in range(1, len(receipt_dates)):
-                                                gap = (receipt_dates.iloc[i]['Date'] - receipt_dates.iloc[i-1]['Date']).days
-                                                if gap > 0:  # เฉพาะที่มีระยะห่างมากกว่า 0 วัน
-                                                    visit_gaps.append(gap)
-                                            
-                                            if visit_gaps:
-                                                # คำนวณสถิติ
-                                                avg_gap = np.mean(visit_gaps)
-                                                min_gap = min(visit_gaps)
-                                                max_gap = max(visit_gaps)
-                                                median_gap = np.median(visit_gaps)
+                                            if customers_data is not None and 'customer_key' in customers_data.columns:
+                                                customer_info = customers_data[customers_data['customer_key'] == selected_customer]
                                                 
-                                                # วิเคราะห์พฤติกรรม
-                                                behavior = ""
-                                                frequency_icon = ""
+                                                if not customer_info.empty:
+                                                    available_cols = list(customer_info.columns)
+                                                    
+                                                    # ลองหาคอลัมน์ First visit โดยตรง (case sensitive)
+                                                    if 'First visit' in customer_info.columns:
+                                                        first_visit_value = customer_info['First visit'].iloc[0]
+                                                        if pd.notna(first_visit_value) and str(first_visit_value).strip() != '':
+                                                            first_visit = str(first_visit_value)
+                                                    
+                                                    # ถ้าไม่พบ ลองหาแบบ case insensitive
+                                                    if first_visit == "ไม่ระบุ":
+                                                        first_visit_cols = [col for col in available_cols if 'first' in col.lower() and 'visit' in col.lower()]
+                                                        
+                                                        if first_visit_cols:
+                                                            first_visit_value = customer_info[first_visit_cols[0]].iloc[0]
+                                                            if pd.notna(first_visit_value) and str(first_visit_value).strip() != '':
+                                                                first_visit = str(first_visit_value)
+                                                    
+                                                    # ถ้ายังไม่พบ ลองหาคำว่า 'first' อย่างเดียว
+                                                    if first_visit == "ไม่ระบุ":
+                                                        first_cols = [col for col in available_cols if 'first' in col.lower()]
+                                                        
+                                                        if first_cols:
+                                                            first_visit_value = customer_info[first_cols[0]].iloc[0]
+                                                            if pd.notna(first_visit_value) and str(first_visit_value).strip() != '':
+                                                                first_visit = str(first_visit_value)
+                                            
+                                            # ถ้ายังไม่พบ ลองใช้คอลัมน์วันที่แรกจาก sales data
+                                            if first_visit == "ไม่ระบุ" and 'Date' in customer_sales.columns:
+                                                min_date = customer_sales['Date'].min()
+                                                if pd.notna(min_date):
+                                                    first_visit = str(min_date).split(' ')[0]  # เอาแค่วันที่
+                                            
+                                            st.metric("📅 First Visit", str(first_visit))
+                                        
+                                        with col2:
+                                            # วันที่มาครั้งล่าสุด จาก Customer data file
+                                            last_visit = "ไม่ระบุ"
+                                            
+                                            if customers_data is not None and 'customer_key' in customers_data.columns:
+                                                customer_info = customers_data[customers_data['customer_key'] == selected_customer]
                                                 
-                                                if avg_gap <= 3:
-                                                    behavior = "ลูกค้าประจำ (เข้าทุก 2-3 วัน)"
-                                                    frequency_icon = "⭐"
-                                                elif avg_gap <= 7:
-                                                    behavior = "ลูกค้าสัปดาห์ละครั้ง"
-                                                    frequency_icon = "📅"
-                                                elif avg_gap <= 14:
-                                                    behavior = "ลูกค้า 2 สัปดาห์ครั้ง"
-                                                    frequency_icon = "🗓️"
-                                                elif avg_gap <= 30:
-                                                    behavior = "ลูกค้าเดือนละครั้ง"
-                                                    frequency_icon = "📆"
-                                                elif avg_gap <= 60:
-                                                    behavior = "ลูกค้า 2 เดือนครั้ง"
-                                                    frequency_icon = "🕐"
+                                                if not customer_info.empty:
+                                                    available_cols = list(customer_info.columns)
+                                                    
+                                                    # ลองหาคอลัมน์ Last visit โดยตรง (case sensitive)
+                                                    if 'Last visit' in customer_info.columns:
+                                                        last_visit_value = customer_info['Last visit'].iloc[0]
+                                                        if pd.notna(last_visit_value) and str(last_visit_value).strip() != '':
+                                                            last_visit = str(last_visit_value)
+                                                    
+                                                    # ถ้าไม่พบ ลองหาแบบ case insensitive
+                                                    if last_visit == "ไม่ระบุ":
+                                                        last_visit_cols = [col for col in available_cols if 'last' in col.lower() and 'visit' in col.lower()]
+                                                        
+                                                        if last_visit_cols:
+                                                            last_visit_value = customer_info[last_visit_cols[0]].iloc[0]
+                                                            if pd.notna(last_visit_value) and str(last_visit_value).strip() != '':
+                                                                last_visit = str(last_visit_value)
+                                                    
+                                                    # ถ้ายังไม่พบ ลองหาคำว่า 'last' อย่างเดียว
+                                                    if last_visit == "ไม่ระบุ":
+                                                        last_cols = [col for col in available_cols if 'last' in col.lower()]
+                                                        
+                                                        if last_cols:
+                                                            last_visit_value = customer_info[last_cols[0]].iloc[0]
+                                                            if pd.notna(last_visit_value) and str(last_visit_value).strip() != '':
+                                                                last_visit = str(last_visit_value)
+                                            
+                                            # ถ้ายังไม่พบ ลองใช้คอลัมน์วันที่ล่าสุดจาก sales data
+                                            if last_visit == "ไม่ระบุ" and 'Date' in customer_sales.columns:
+                                                max_date = customer_sales['Date'].max()
+                                                if pd.notna(max_date):
+                                                    last_visit = str(max_date).split(' ')[0]  # เอาแค่วันที่
+                                            
+                                            # แสดง Last Visit
+                                            # คำนวณวันที่ผ่านมา
+                                            days_since_last_visit = None
+                                            if last_visit != "ไม่ระบุ":
+                                                try:
+                                                    # ลองแปลงวันที่ในรูปแบบต่างๆ
+                                                    last_visit_date = None
+                                                    for date_format in ['%Y-%m-%d', '%d/%m/%Y', '%d-%m-%Y', '%Y/%m/%d']:
+                                                        try:
+                                                            last_visit_date = pd.to_datetime(last_visit.split(' ')[0], format=date_format)
+                                                            break
+                                                        except:
+                                                            continue
+                                                    
+                                                    # ถ้าแปลงไม่ได้ด้วยรูปแบบที่กำหนด ลองใช้ pandas อัตโนมัติ
+                                                    if last_visit_date is None:
+                                                        last_visit_date = pd.to_datetime(last_visit.split(' ')[0])
+                                                    
+                                                    current_date = pd.Timestamp.now()
+                                                    days_since_last_visit = (current_date - last_visit_date).days
+                                                except:
+                                                    days_since_last_visit = None
+                                            
+                                            if days_since_last_visit is not None:
+                                                st.metric(
+                                                    "📅 Last Visit", 
+                                                    str(last_visit),
+                                                    delta=f"{days_since_last_visit} วันที่แล้ว"
+                                                )
+                                            else:
+                                                st.metric("📅 Last Visit", str(last_visit))
+                                        
+                                        with col3:
+                                            # คำนวณสถานะ Active/Non-Active (เกิน 90 วัน = Non-Active)
+                                            customer_status = "ไม่ระบุ"
+                                            status_color = "🔄"
+                                            
+                                            if days_since_last_visit is not None:
+                                                if days_since_last_visit <= 90:
+                                                    customer_status = "Active"
+                                                    status_color = "🟢"
                                                 else:
-                                                    behavior = "ลูกค้าเป็นครั้งคราว"
-                                                    frequency_icon = "⏰"
+                                                    customer_status = "Non-Active"
+                                                    status_color = "🔴"
+                                            
+                                            # แสดงสถานะลูกค้า
+                                            st.metric(
+                                                f"{status_color} Customer Status", 
+                                                customer_status,
+                                                delta="≤90 วัน = Active" if customer_status == "Active" else ">90 วัน = Non-Active" if customer_status == "Non-Active" else None
+                                            )
+                                        
+                                        # บรรทัดที่สอง: Total Sales | Total Profit | Total Orders | Avg per Bill | Profit Margin
+                                        col1, col2, col3, col4, col5 = st.columns(5)
+                                        
+                                        with col1:
+                                            # Total Sales
+                                            total_sales = customer_sales['Net sales'].sum()
+                                            st.metric("💰 Total Sales", f"{total_sales:,.2f}")
+                                        
+                                        with col2:
+                                            # Total Profit
+                                            total_profit = customer_sales['Gross profit'].sum() if 'Gross profit' in customer_sales.columns else 0
+                                            st.metric("💵 Total Profit", f"{total_profit:,.2f}")
+                                        
+                                        with col3:
+                                            # Total Orders
+                                            total_orders = customer_sales['Receipt number'].nunique() if 'Receipt number' in customer_sales.columns else len(customer_sales)
+                                            st.metric("🧾 Total Orders", f"{total_orders:,}")
+                                        
+                                        with col4:
+                                            # Avg per Bill
+                                            avg_per_bill = total_sales / total_orders if total_orders > 0 else 0
+                                            st.metric("📊 Avg per Bill", f"{avg_per_bill:,.2f}")
+                                        
+                                        with col5:
+                                            # Profit Margin %
+                                            profit_margin = (total_profit / total_sales * 100) if total_sales > 0 else 0
+                                            st.metric("📈 Profit Margin", f"{profit_margin:.1f}%")
+                                        
+                                        # ===== Pet Type Analysis =====
+                                            
+                                        st.markdown("---")
+                                        st.markdown("#### 🐾 Pet Type Analysis")
+                                        
+                                        # วิเคราะห์ประเภทสัตว์เลี้ยงจากสินค้าที่ซื้อ
+                                        cat_items = customer_sales[customer_sales['Category_disp'].str.contains('CAT|แมว', case=False, na=False)]
+                                        dog_items = customer_sales[customer_sales['Category_disp'].str.contains('DOG|หมา|สุนัข', case=False, na=False)]
+                                        
+                                        cat_count = len(cat_items)
+                                        dog_count = len(dog_items)
+                                        total_purchases = len(customer_sales)
+                                        
+                                        # คำนวณเปอร์เซ็นต์
+                                        cat_percentage = (cat_count / total_purchases * 100) if total_purchases > 0 else 0
+                                        dog_percentage = (dog_count / total_purchases * 100) if total_purchases > 0 else 0
+                                        
+                                        # คาดการณ์ประเภทสัตว์เลี้ยง
+                                        has_cat = cat_percentage > 0
+                                        has_dog = dog_percentage > 0
+                                        
+                                        if has_cat and has_dog:
+                                            # ถ้าซื้อทั้ง Cat และ Dog
+                                            prediction = "เลี้ยงทั้งแมว และ สุนัข"
+                                            icon = "🐱🐶"
+                                        elif has_cat:
+                                            # ถ้าซื้อแค่ Cat
+                                            prediction = "เลี้ยงแมว"
+                                            icon = "🐱"
+                                        elif has_dog:
+                                            # ถ้าซื้อแค่ Dog
+                                            prediction = "เลี้ยงสุนัข"
+                                            icon = "🐶"
+                                        else:
+                                            # ไม่มีข้อมูลชัดเจน
+                                            prediction = "ไม่สามารถระบุได้"
+                                            icon = "❓"
+                                        
+                                        # แสดง Card
+                                        col_pet1, col_pet2 = st.columns(2)
+                                        
+                                        with col_pet1:
+                                            # สร้างสไตล์ตาม prediction
+                                            if has_cat and has_dog:
+                                                st.success(f"""
+                                                **{icon} Pet Type Prediction**
                                                 
-                                                # แสดงผล
-                                                col_freq1, col_freq2 = st.columns(2)
+                                                **คาดการณ์:** {prediction}
                                                 
-                                                with col_freq1:
-                                                    st.success(f"""
-                                                    **{frequency_icon} Visit Pattern**
-                                                    
-                                                    **พฤติกรรม:** {behavior}
-                                                    
-                                                    **ระยะห่างเฉลี่ย:** {avg_gap:.1f} วัน
-                                                    
-                                                    **Total Visits:** {len(receipt_dates)} ครั้ง
-                                                    """)
+                                                ลูกค้าคนนี้น่าจะเลี้ยงทั้งแมวและสุนัข! 🏠
+                                                """)
+                                            elif has_cat:
+                                                st.info(f"""
+                                                **{icon} Pet Type Prediction**
                                                 
-                                                with col_freq2:
-                                                    st.info(f"""
-                                                    **📊 Visit Statistics**
-                                                    
-                                                    **ระยะห่างน้อยที่สุด:** {min_gap} วัน
-                                                    
-                                                    **ระยะห่างมากที่สุด:** {max_gap} วัน
-                                                    
-                                                    **ระยะห่าง Median:** {median_gap:.1f} วัน
-                                                    """)
+                                                **คาดการณ์:** {prediction}
                                                 
-                                                # แสดงกราฟแสดงความถี่การเข้าร้าน
-                                                if len(visit_gaps) > 1:
-                                                    st.markdown("**📈 Visit Gap Distribution**")
+                                                ลูกค้าคนนี้น่าจะเป็นทาสแมว! 😸
+                                                """)
+                                            elif has_dog:
+                                                st.info(f"""
+                                                **{icon} Pet Type Prediction**
+                                                
+                                                **คาดการณ์:** {prediction}
+                                                
+                                                ลูกค้าคนนี้น่าจะรักสุนัข! 🐕
+                                                """)
+                                            else:
+                                                st.warning(f"""
+                                                **{icon} Pet Type Prediction**
+                                                
+                                                **คาดการณ์:** {prediction}
+                                                
+                                                ยังไม่มีข้อมูลที่ชัดเจน
+                                                """)
+                                        
+                                        with col_pet2:
+                                            st.info(f"""
+                                            **📊 Purchase Analysis**
+                                            
+                                            **Cat Products:** {cat_count} รายการ ({cat_percentage:.1f}%)
+                                            
+                                            **Dog Products:** {dog_count} รายการ ({dog_percentage:.1f}%)
+                                            
+                                            **Total Items:** {total_purchases} รายการ
+                                            """)
+                                        
+                                        # Visit Frequency Analysis
+                                        st.markdown("---")
+                                        st.markdown("#### 📅 Visit Frequency Analysis")
+                                        
+                                        # วิเคราะห์ความถี่ในการเข้าร้าน
+                                        if 'Date' in customer_sales.columns and 'Receipt number' in customer_sales.columns:
+                                            # หาวันที่ไม่ซ้ำกันของการซื้อแต่ละใบเสร็จ
+                                            receipt_dates = customer_sales.groupby('Receipt number')['Date'].first().reset_index()
+                                            receipt_dates['Date'] = pd.to_datetime(receipt_dates['Date'], errors='coerce')
+                                            receipt_dates = receipt_dates.dropna(subset=['Date'])
+                                            receipt_dates = receipt_dates.sort_values('Date')
+                                            
+                                            if len(receipt_dates) >= 2:
+                                                # คำนวณระยะห่างระหว่างการเข้าร้าน (วัน)
+                                                visit_gaps = []
+                                                for i in range(1, len(receipt_dates)):
+                                                    gap = (receipt_dates.iloc[i]['Date'] - receipt_dates.iloc[i-1]['Date']).days
+                                                    if gap > 0:  # เฉพาะที่มีระยะห่างมากกว่า 0 วัน
+                                                        visit_gaps.append(gap)
+                                                
+                                                if visit_gaps:
+                                                    # คำนวณสถิติ
+                                                    avg_gap = np.mean(visit_gaps)
+                                                    min_gap = min(visit_gaps)
+                                                    max_gap = max(visit_gaps)
+                                                    median_gap = np.median(visit_gaps)
                                                     
-                                                    # สร้างข้อมูลสำหรับกราฟ
-                                                    gap_df = pd.DataFrame({'Visit_Gap': visit_gaps})
+                                                    # วิเคราะห์พฤติกรรม
+                                                    behavior = ""
+                                                    frequency_icon = ""
                                                     
-                                                    # Histogram
-                                                    hist_chart = alt.Chart(gap_df).mark_bar(
-                                                        color='steelblue',
-                                                        opacity=0.7
-                                                    ).encode(
-                                                        alt.X('Visit_Gap:Q', bin=alt.Bin(maxbins=15), title='ระยะห่างการเข้าร้าน (วัน)'),
-                                                        alt.Y('count():Q', title='จำนวนครั้ง'),
-                                                        tooltip=['count():Q']
-                                                    ).properties(
-                                                        width=400,
-                                                        height=200,
-                                                        title="การกระจายของระยะห่างการเข้าร้าน"
-                                                    )
+                                                    if avg_gap <= 3:
+                                                        behavior = "ลูกค้าประจำ (เข้าทุก 2-3 วัน)"
+                                                        frequency_icon = "⭐"
+                                                    elif avg_gap <= 7:
+                                                        behavior = "ลูกค้าสัปดาห์ละครั้ง"
+                                                        frequency_icon = "📅"
+                                                    elif avg_gap <= 14:
+                                                        behavior = "ลูกค้า 2 สัปดาห์ครั้ง"
+                                                        frequency_icon = "🗓️"
+                                                    elif avg_gap <= 30:
+                                                        behavior = "ลูกค้าเดือนละครั้ง"
+                                                        frequency_icon = "📆"
+                                                    elif avg_gap <= 60:
+                                                        behavior = "ลูกค้า 2 เดือนครั้ง"
+                                                        frequency_icon = "🕐"
+                                                    else:
+                                                        behavior = "ลูกค้าเป็นครั้งคราว"
+                                                        frequency_icon = "⏰"
                                                     
-                                                    st.altair_chart(hist_chart, use_container_width=True)
+                                                    # แสดงผล
+                                                    col_freq1, col_freq2 = st.columns(2)
+                                                    
+                                                    with col_freq1:
+                                                        st.success(f"""
+                                                        **{frequency_icon} Visit Pattern**
+                                                        
+                                                        **พฤติกรรม:** {behavior}
+                                                        
+                                                        **ระยะห่างเฉลี่ย:** {avg_gap:.1f} วัน
+                                                        
+                                                        **Total Visits:** {len(receipt_dates)} ครั้ง
+                                                        """)
+                                                    
+                                                    with col_freq2:
+                                                        st.info(f"""
+                                                        **📊 Visit Statistics**
+                                                        
+                                                        **ระยะห่างน้อยที่สุด:** {min_gap} วัน
+                                                        
+                                                        **ระยะห่างมากที่สุด:** {max_gap} วัน
+                                                        
+                                                        **ระยะห่าง Median:** {median_gap:.1f} วัน
+                                                        """)
+                                                
+                                                else:
+                                                    st.warning("⚠️ ไม่สามารถคำนวณระยะห่างการเข้าร้านได้ (วันที่ซื้อซ้ำกัน)")
+                                            
+                                            elif len(receipt_dates) == 1:
+                                                st.info("🔔 ลูกค้าใหม่ - มีการซื้อเพียงครั้งเดียว")
                                             
                                             else:
-                                                st.warning("⚠️ ไม่สามารถคำนวณระยะห่างการเข้าร้านได้ (วันที่ซื้อซ้ำกัน)")
-                                        
-                                        elif len(receipt_dates) == 1:
-                                            st.info("🔔 ลูกค้าใหม่ - มีการซื้อเพียงครั้งเดียว")
+                                                st.warning("❌ ไม่มีข้อมูลการซื้อที่สามารถวิเคราะห์ได้")
                                         
                                         else:
-                                            st.warning("❌ ไม่มีข้อมูลการซื้อที่สามารถวิเคราะห์ได้")
-                                    
-                                    else:
-                                        st.warning("❌ ไม่มีข้อมูล Date หรือ Receipt number สำหรับการวิเคราะห์")
-                                    
-                                    # สัดส่วน Category เป็น Pie Chart
-                                    st.markdown("#### 🥧 Category Distribution")
-                                    
-                                    category_dist = customer_sales.groupby('Category_disp')['Net sales'].sum().reset_index()
-                                    category_dist = category_dist.sort_values('Net sales', ascending=False)
-                                    category_dist['Percentage'] = (category_dist['Net sales'] / category_dist['Net sales'].sum() * 100).round(2)
-                                    
-                                    if not category_dist.empty:
-                                        # Pie chart
-                                        pie_chart = alt.Chart(category_dist).mark_arc(
-                                            innerRadius=40,
-                                            outerRadius=100,
-                                            stroke='white',
-                                            strokeWidth=2
-                                        ).encode(
-                                            theta=alt.Theta('Net sales:Q', sort=alt.Sort(field='Net sales', order='descending')),
-                                            color=alt.Color('Category_disp:N', scale=alt.Scale(scheme='category20')),
-                                            tooltip=[
-                                                alt.Tooltip('Category_disp:N', title='Category'),
-                                                alt.Tooltip('Net sales:Q', title='Sales', format=',.2f'),
-                                                alt.Tooltip('Percentage:Q', title='%', format='.1f')
-                                            ]
-                                        ).properties(
-                                            width=300,
-                                            height=300,
-                                            title=f"Category Distribution - {selected_customer.split(' | ')[0]}"
-                                        )
+                                            st.warning("❌ ไม่มีข้อมูล Date หรือ Receipt number สำหรับการวิเคราะห์")
                                         
-                                        st.altair_chart(pie_chart, use_container_width=True)
-                                    
-                                    # ตาราง Purchase Detail (Pivot Format)
-                                    st.markdown("#### 📋 Purchase Detail")
-                                    
-                                    # เตรียมข้อมูลสำหรับตาราง pivot
-                                    if 'Date' in customer_sales.columns and 'Category_disp' in customer_sales.columns:
-                                        # สร้างข้อมูลสำหรับ pivot
-                                        pivot_data = customer_sales.copy()
+                                        # Monthly Sales Trend
+                                        st.markdown("#### 📊 Monthly Sales Trend (3 เดือนล่าสุด)")
                                         
-                                        # แปลง Date และสร้าง Date string
-                                        pivot_data['Date'] = pd.to_datetime(pivot_data['Date'], errors='coerce')
-                                        pivot_data = pivot_data.dropna(subset=['Date'])
-                                        pivot_data['Date_str'] = pivot_data['Date'].dt.strftime('%Y-%m-%d')
-                                        
-                                        # เตรียมข้อมูลสำหรับแสดงในตาราง (ไม่รวม Category column)
-                                        detail_cols = ['Date_str', 'Cate_brand', 'Item', 'Net sales']
-                                        available_cols = [col for col in detail_cols if col in pivot_data.columns]
-                                        
-                                        if available_cols:
-                                            # สร้างตารางที่เรียงลำดับ
-                                            purchase_detail = pivot_data[available_cols].copy()
-                                            # เรียงตามวันที่และ Cate_brand แทน Category_disp
-                                            if 'Cate_brand' in purchase_detail.columns:
-                                                purchase_detail = purchase_detail.sort_values(['Date_str', 'Cate_brand', 'Item'], ascending=[False, True, True])
+                                        if 'Date' in customer_sales.columns:
+                                            # คำนวณ 3 เดือนย้อนหลัง - ใช้ข้อมูลทั้งหมดในระบบ
+                                            customer_sales['Date'] = pd.to_datetime(customer_sales['Date'], errors='coerce')
+                                            customer_sales_clean = customer_sales.dropna(subset=['Date'])
+                                            
+                                            if not customer_sales_clean.empty:
+                                                # ใช้ข้อมูลทั้งระบบเพื่อหา 3 เดือนล่าสุด
+                                                all_sales = valid_sales_data.copy()
+                                                all_sales['Date'] = pd.to_datetime(all_sales['Date'], errors='coerce')
+                                                all_sales_clean = all_sales.dropna(subset=['Date'])
+                                                
+                                                # หา 3 เดือนล่าสุดจากข้อมูลทั้งหมด
+                                                all_months = sorted(all_sales_clean['Date'].dt.to_period('M').astype(str).unique())
+                                                last_3_months = all_months[-3:]  # ['2025-07', '2025-08', '2025-09']
+                                                
+                                                # สร้างข้อมูลรายเดือนของลูกค้า
+                                                customer_sales_clean['YearMonth'] = customer_sales_clean['Date'].dt.to_period('M').astype(str)
+                                                monthly_summary = customer_sales_clean.groupby('YearMonth').agg({
+                                                    'Net sales': 'sum',
+                                                    'Receipt number': 'nunique' if 'Receipt number' in customer_sales_clean.columns else 'count'
+                                                }).reset_index()
+                                                monthly_summary.columns = ['Month', 'Net_Sales', 'Orders']
+                                                
+                                                # กรองเฉพาะ 3 เดือนล่าสุดและเรียงลำดับ
+                                                monthly_summary = monthly_summary[monthly_summary['Month'].isin(last_3_months)]
+                                                monthly_summary = monthly_summary.sort_values('Month')
+                                                
+                                                # เติมเดือนที่ขาดหายด้วย 0
+                                                for month in last_3_months:
+                                                    if month not in monthly_summary['Month'].values:
+                                                        new_row = pd.DataFrame({'Month': [month], 'Net_Sales': [0], 'Orders': [0]})
+                                                        monthly_summary = pd.concat([monthly_summary, new_row], ignore_index=True)
+                                                
+                                                monthly_summary = monthly_summary.sort_values('Month', ascending=False)
+                                                
+                                                if len(monthly_summary) >= 1:
+                                                    # สรุปภาพรวม 3 เดือนด้านบน
+                                                    if len(monthly_summary) >= 2:
+                                                        st.markdown("##### 📈 3-Month Summary")
+                                                        
+                                                        # คำนวณ Overall Trend
+                                                        total_sales_3months = monthly_summary['Net_Sales'].sum()
+                                                        total_orders_3months = monthly_summary['Orders'].sum()
+                                                        avg_monthly_sales = monthly_summary['Net_Sales'].mean()
+                                                        
+                                                        # 🔄 NEW: Trend Direction (เดือนล่าสุด vs MA ของ 3 เดือนก่อนหน้า)
+                                                        if len(monthly_summary) >= 4:  # ต้องมีอย่างน้อย 4 เดือนเพื่อคำนวณ MA 3 เดือนก่อนหน้า
+                                                            # หาข้อมูลทั้งหมดของลูกค้าคนนี้ (ขยายออกไปมากกว่า 3 เดือน)
+                                                            customer_all_months = customer_sales_clean.groupby('YearMonth').agg({
+                                                                'Net sales': 'sum'
+                                                            }).reset_index()
+                                                            customer_all_months.columns = ['Month', 'Net_Sales']
+                                                            customer_all_months = customer_all_months.sort_values('Month')
+                                                            
+                                                            # หาตำแหน่งของเดือนล่าสุด
+                                                            latest_month = monthly_summary.iloc[0]['Month']
+                                                            all_months_list = customer_all_months['Month'].tolist()
+                                                            
+                                                            if latest_month in all_months_list:
+                                                                latest_idx = all_months_list.index(latest_month)
+                                                                
+                                                                # คำนวณ MA ของ 3 เดือนก่อนหน้า (idx-3, idx-2, idx-1)
+                                                                if latest_idx >= 3:
+                                                                    ma_3_months = customer_all_months.iloc[latest_idx-3:latest_idx]['Net_Sales'].mean()
+                                                                    latest_month_sales = monthly_summary.iloc[0]['Net_Sales']
+                                                                    
+                                                                    overall_trend = ((latest_month_sales - ma_3_months) / ma_3_months * 100) if ma_3_months > 0 else 0
+                                                                else:
+                                                                    # ถ้าข้อมูลไม่พอ 4 เดือน ใช้วิธีเดิม
+                                                                    first_month_sales = monthly_summary.iloc[-1]['Net_Sales']
+                                                                    last_month_sales = monthly_summary.iloc[0]['Net_Sales']
+                                                                    overall_trend = ((last_month_sales - first_month_sales) / first_month_sales * 100) if first_month_sales > 0 else 0
+                                                            else:
+                                                                # ถ้าหาไม่เจอ ใช้วิธีเดิม
+                                                                first_month_sales = monthly_summary.iloc[-1]['Net_Sales']
+                                                                last_month_sales = monthly_summary.iloc[0]['Net_Sales']
+                                                                overall_trend = ((last_month_sales - first_month_sales) / first_month_sales * 100) if first_month_sales > 0 else 0
+                                                        else:
+                                                            # ถ้าข้อมูลน้อยกว่า 4 เดือน ใช้วิธีเดิม
+                                                            if len(monthly_summary) >= 2:
+                                                                first_month_sales = monthly_summary.iloc[-1]['Net_Sales']
+                                                                last_month_sales = monthly_summary.iloc[0]['Net_Sales']
+                                                                overall_trend = ((last_month_sales - first_month_sales) / first_month_sales * 100) if first_month_sales > 0 else 0
+                                                            else:
+                                                                overall_trend = 0
+                                                        
+                                                        col_sum1, col_sum2, col_sum3 = st.columns(3)
+                                                        
+                                                        with col_sum1:
+                                                            st.metric("💰 Total 3M Sales", f"{total_sales_3months:,.2f}", f"{overall_trend:+.1f}%")
+                                                        
+                                                        with col_sum2:
+                                                            st.metric("📊 Avg Monthly", f"{avg_monthly_sales:,.2f}", f"{total_orders_3months} orders")
+                                                        
+                                                        with col_sum3:
+                                                            trend_status = "Growing 📈" if overall_trend > 5 else "Declining 📉" if overall_trend < -5 else "Stable ➡️"
+                                                            st.metric("📈 3M Trend", trend_status, f"{overall_trend:+.1f}%")
+                                                        
+                                                        # คำอธิบายวิธีการคิด 3M Trend
+                                                        with st.expander("ℹ️ วิธีการคำนวณ 3M Trend"):
+                                                            st.markdown("""
+                                                            **📈 3M Trend** แสดงแนวโน้มการเติบโตของลูกค้าโดยเปรียบเทียบ:
+                                                            
+                                                            **🔄 วิธีการคำนวณ:**
+                                                            - **เดือนล่าสุด** เทียบกับ **ค่าเฉลี่ย 3 เดือนก่อนหน้า** (Moving Average)
+                                                            - สูตร: `(เดือนล่าสุด - MA_3เดือนก่อนหน้า) / MA_3เดือนก่อนหน้า × 100`
+                                                            
+                                                            **📊 ตัวอย่าง:**
+                                                            ```
+                                                            ข้อมูล 6 เดือน: 800, 900, 850, 1000, 1100, 1400
+                                                            เดือนล่าสุด: 1,400 บาท (เดือนที่ 6)
+                                                            MA 3 เดือนก่อนหน้า: (850+1000+1100)/3 = 983.33 บาท
+                                                            3M Trend = (1,400 - 983.33) / 983.33 × 100 = +42.4%
+                                                            ```
+                                                            
+                                                            **🎯 ความหมาย:**
+                                                            - **Growing 📈** (+5% ขึ้นไป): ยอดขายสูงกว่าปกติมาก
+                                                            - **Stable ➡️** (-5% ถึง +5%): ยอดขายอยู่ในระดับปกติ  
+                                                            - **Declining 📉** (-5% ลงไป): ยอดขายต่ำกว่าปกติมาก
+                                                            
+                                                            **✅ ข้อดี:** เสถียรกว่าการเปรียบเทียบแค่เดือนต่อเดือน และลดผลกระทบจากความผันผวนชั่วคราว
+                                                            """)
+                                                        
+                                                        # Stacked Bar Chart: ยอดขายแต่ละเดือนแยกตาม Cate_brand
+                                                        st.markdown("**📊 Sales by Category+Brand (3 Months)**")
+                                                        
+                                                        # เตรียมข้อมูลสำหรับ Stacked Bar Chart
+                                                        chart_data = customer_sales_clean[customer_sales_clean['YearMonth'].isin(last_3_months)].copy()
+                                                        chart_data = chart_data.groupby(['YearMonth', 'Cate_brand'])['Net sales'].sum().reset_index()
+                                                        chart_data.columns = ['Month', 'Category_Brand', 'Sales']
+                                                        
+                                                        if not chart_data.empty:
+                                                            # สร้าง Stacked Bar Chart
+                                                            stacked_chart = alt.Chart(chart_data).mark_bar().encode(
+                                                                x=alt.X('Month:N', title='เดือน', sort=last_3_months),
+                                                                y=alt.Y('Sales:Q', title='ยอดขาย (บาท)', stack='zero'),
+                                                                color=alt.Color('Category_Brand:N', title='Category + Brand', scale=alt.Scale(scheme='category20')),
+                                                                tooltip=[
+                                                                    alt.Tooltip('Month:N', title='เดือน'),
+                                                                    alt.Tooltip('Category_Brand:N', title='Category+Brand'),
+                                                                    alt.Tooltip('Sales:Q', title='ยอดขาย', format=',.2f')
+                                                                ]
+                                                            ).properties(
+                                                                width=700,
+                                                                height=400,
+                                                                title=f"Sales Breakdown by Category+Brand - {selected_customer.split(' | ')[0]}"
+                                                            )
+                                                            
+                                                            st.altair_chart(stacked_chart, use_container_width=True)
+                                                        
+                                                        st.markdown("---")
+                                                    
+                                                    # แสดงข้อมูลแต่ละเดือนแยกคอลัมน์
+                                                    for idx, (_, month_data) in enumerate(monthly_summary.iterrows()):
+                                                        month_name = month_data['Month']
+                                                        month_sales = month_data['Net_Sales']
+                                                        month_orders = month_data['Orders']
+                                                        
+                                                        # 🔄 NEW: คำนวณ Trend ด้วยวิธีใหม่ (เดือนปัจจุบัน vs MA 3 เดือนก่อนหน้า)
+                                                        trend_icon = "📊"
+                                                        trend_text = ""
+                                                        
+                                                        # ดึงข้อมูลทั้งหมดของลูกค้าเพื่อหา MA
+                                                        customer_all_months = customer_sales_clean.groupby('YearMonth').agg({
+                                                            'Net sales': 'sum'
+                                                        }).reset_index()
+                                                        customer_all_months.columns = ['Month', 'Net_Sales']
+                                                        customer_all_months = customer_all_months.sort_values('Month')
+                                                        
+                                                        # หาตำแหน่งของเดือนปัจจุบัน
+                                                        current_month = month_name
+                                                        all_months_list = customer_all_months['Month'].tolist()
+                                                        
+                                                        if current_month in all_months_list:
+                                                            current_idx = all_months_list.index(current_month)
+                                                            
+                                                            # ตรวจสอบว่ามีข้อมูล 3 เดือนก่อนหน้าหรือไม่
+                                                            if current_idx >= 3:
+                                                                # คำนวณ MA ของ 3 เดือนก่อนหน้า
+                                                                ma_3_months = customer_all_months.iloc[current_idx-3:current_idx]['Net_Sales'].mean()
+                                                                
+                                                                if ma_3_months > 0:
+                                                                    # คำนวณ % เปลี่ยนแปลง: (เดือนปัจจุบัน - MA) / MA * 100
+                                                                    change_pct = ((month_sales - ma_3_months) / ma_3_months * 100)
+                                                                    
+                                                                    if change_pct > 5:  # เติบโต
+                                                                        trend_icon = "📈"
+                                                                        trend_text = f"(+{change_pct:.1f}%)"
+                                                                    elif change_pct < -5:  # ลดลง
+                                                                        trend_icon = "📉"
+                                                                        trend_text = f"({change_pct:.1f}%)"
+                                                                    else:  # คงที่
+                                                                        trend_icon = "➡️"
+                                                                        trend_text = f"({change_pct:+.1f}%)"
+                                                                else:
+                                                                    trend_text = "(MA=0)"
+                                                            else:
+                                                                # ถ้าข้อมูลไม่พอ 4 เดือน ใช้วิธีเดิม (เปรียบเทียบกับเดือนก่อนหน้า)
+                                                                if idx < len(monthly_summary) - 1:
+                                                                    prev_month_sales = monthly_summary.iloc[idx+1]['Net_Sales']
+                                                                    if prev_month_sales > 0:
+                                                                        change_pct = ((month_sales - prev_month_sales) / prev_month_sales * 100)
+                                                                        if change_pct > 5:
+                                                                            trend_icon = "📈"
+                                                                            trend_text = f"(+{change_pct:.1f}%)"
+                                                                        elif change_pct < -5:
+                                                                            trend_icon = "📉"
+                                                                            trend_text = f"({change_pct:.1f}%)"
+                                                                        else:
+                                                                            trend_icon = "➡️"
+                                                                            trend_text = f"({change_pct:+.1f}%)"
+                                                        else:
+                                                            # ถ้าหาเดือนไม่เจอ ใช้วิธีเดิม
+                                                            if idx < len(monthly_summary) - 1:
+                                                                prev_month_sales = monthly_summary.iloc[idx+1]['Net_Sales']
+                                                                if prev_month_sales > 0:
+                                                                    change_pct = ((month_sales - prev_month_sales) / prev_month_sales * 100)
+                                                                    if change_pct > 5:
+                                                                        trend_icon = "📈"
+                                                                        trend_text = f"(+{change_pct:.1f}%)"
+                                                                    elif change_pct < -5:
+                                                                        trend_icon = "📉"
+                                                                        trend_text = f"({change_pct:.1f}%)"
+                                                                    else:
+                                                                        trend_icon = "➡️"
+                                                                        trend_text = f"({change_pct:+.1f}%)"
+                                                        
+                                                        # แสดงหัวข้อเดือน
+                                                        st.markdown(f"##### {trend_icon} {month_name} - {month_sales:,.2f} บาท ({month_orders} orders) {trend_text}")
+                                                        
+                                                        # คำอธิบายวิธีการคิด Trend รายเดือน (แสดงเฉพาะเดือนแรก)
+                                                        if idx == 0:  # แสดงเฉพาะเดือนใหม่สุด
+                                                            with st.expander("ℹ️ วิธีการคำนวณ Trend รายเดือน"):
+                                                                st.markdown("""
+                                                                **📊 Trend รายเดือน** แสดงการเปรียบเทียบยอดขายของแต่ละเดือน:
+                                                                
+                                                                **🔄 วิธีการคำนวณ:**
+                                                                - **ถ้ามีข้อมูล ≥ 4 เดือน:** เปรียบเทียบกับ Moving Average ของ 3 เดือนก่อนหน้า
+                                                                - **ถ้ามีข้อมูล < 4 เดือน:** เปรียบเทียบกับเดือนก่อนหน้าโดยตรง
+                                                                
+                                                                **📈 สัญลักษณ์:**
+                                                                - **📈 (+5% ขึ้นไป):** เติบโตสูงกว่าค่าเฉลี่ย/เดือนก่อน
+                                                                - **➡️ (-5% ถึง +5%):** อยู่ในระดับปกติ
+                                                                - **📉 (-5% ลงไป):** ลดลงจากค่าเฉลี่ย/เดือนก่อน
+                                                                
+                                                                **💡 ตัวอย่าง:** ถ้าเดือนปัจจุบัน 1,200 บาท และ MA 3 เดือนก่อนหน้า 1,000 บาท
+                                                                จะแสดง: `📈 (+20.0%)` = (1,200-1,000)/1,000×100
+                                                                """)
+                                                        
+                                                        # กรองข้อมูลของเดือนนั้นๆ เพื่อวิเคราะห์ Cate+Brand
+                                                        month_transactions = customer_sales_clean[customer_sales_clean['YearMonth'] == month_name].copy()
+                                                        
+                                                        if not month_transactions.empty and month_sales > 0:
+                                                            # วิเคราะห์ Cate+Brand ในเดือนนี้
+                                                            month_cate_brand = month_transactions.groupby('Cate_brand').agg({
+                                                                'Net sales': 'sum',
+                                                                'Item': lambda x: list(x.unique())  # รายการ SKU
+                                                            }).reset_index()
+                                                            month_cate_brand.columns = ['Cate_Brand', 'Sales', 'SKUs']
+                                                            month_cate_brand = month_cate_brand.sort_values('Sales', ascending=False)
+                                                            
+                                                            # แสดงในรูปแบบ 2 คอลัมน์
+                                                            col_month_left, col_month_right = st.columns(2)
+                                                            
+                                                            with col_month_left:
+                                                                st.markdown("**🏷️ Categories+Brands:**")
+                                                                for i, row in month_cate_brand.iterrows():
+                                                                    percentage = (row['Sales'] / month_sales * 100)
+                                                                    
+                                                                    # ใช้ expander เพื่อแสดงรายละเอียด SKU
+                                                                    with st.expander(f"**{row['Cate_Brand']}** - {row['Sales']:,.2f} บาท ({percentage:.1f}%) - {len(row['SKUs'])} SKUs"):
+                                                                        # วิเคราะห์ SKU แต่ละตัวใน Category+Brand นี้
+                                                                        sku_details = month_transactions[
+                                                                            month_transactions['Cate_brand'] == row['Cate_Brand']
+                                                                        ].groupby('Item').agg({
+                                                                            'Net sales': 'sum',
+                                                                            'Quantity': 'sum' if 'Quantity' in month_transactions.columns else 'count'
+                                                                        }).reset_index()
+                                                                        sku_details.columns = ['SKU', 'Sales', 'Quantity']
+                                                                        sku_details = sku_details.sort_values('Sales', ascending=False)
+                                                                        
+                                                                        # แสดงรายละเอียด SKU แต่ละตัว
+                                                                        for _, sku in sku_details.iterrows():
+                                                                            sku_pct = (sku['Sales'] / row['Sales'] * 100)
+                                                                            st.markdown(f"""
+                                                                            <div style='background-color: #ffffff; padding: 6px; margin: 2px 0; border-radius: 3px; border-left: 3px solid #4CAF50;'>
+                                                                                <strong>📦 {sku['SKU']}</strong><br>
+                                                                                💰 {sku['Sales']:,.2f} บาท ({sku_pct:.1f}%)<br>
+                                                                                � จำนวน: {int(sku['Quantity'])} ชิ้น
+                                                                            </div>
+                                                                            """, unsafe_allow_html=True)
+                                                            
+                                                            with col_month_right:
+                                                                # สถิติเพิ่มเติม - แก้ไขการนับ SKU ให้ถูกต้อง
+                                                                total_skus_in_month = len(month_transactions['Item'].unique())
+                                                                
+                                                                st.info(f"""
+                                                                **📊 Month Statistics**
+                                                                
+                                                                **Total Categories:** {len(month_cate_brand)} categories
+                                                                
+                                                                **Total SKUs:** {total_skus_in_month} items
+                                                                
+                                                                **Avg per Category:** {month_sales / len(month_cate_brand):,.2f} บาท
+                                                                """)
+                                                            
+                                                            # เส้นแบ่งระหว่างเดือน
+                                                            if idx < len(monthly_summary) - 1:
+                                                                st.markdown("---")
+                                                    
+                                                else:
+                                                    st.info("📊 ข้อมูลไม่เพียงพอสำหรับการวิเคราะห์แนวโน้ม (ต้องมีอย่างน้อย 1 เดือน)")
                                             else:
-                                                purchase_detail = purchase_detail.sort_values(['Date_str', 'Item'], ascending=[False, True])
+                                                st.warning("❌ ไม่มีข้อมูลวันที่ที่ถูกต้องสำหรับการวิเคราะห์")
+                                        
+                                        # Category Distribution
+                                        st.markdown("#### 🥧 Category Distribution")
+                                        
+                                        category_dist = customer_sales.groupby('Category_disp')['Net sales'].sum().reset_index()
+                                        category_dist = category_dist.sort_values('Net sales', ascending=False)
+                                        category_dist['Percentage'] = (category_dist['Net sales'] / category_dist['Net sales'].sum() * 100).round(2)
+                                        
+                                        if not category_dist.empty:
+                                            # Pie chart
+                                            pie_chart = alt.Chart(category_dist).mark_arc(
+                                                innerRadius=40,
+                                                outerRadius=100,
+                                                stroke='white',
+                                                strokeWidth=2
+                                            ).encode(
+                                                theta=alt.Theta('Net sales:Q', sort=alt.Sort(field='Net sales', order='descending')),
+                                                color=alt.Color('Category_disp:N', scale=alt.Scale(scheme='category20')),
+                                                tooltip=[
+                                                    alt.Tooltip('Category_disp:N', title='Category'),
+                                                    alt.Tooltip('Net sales:Q', title='Sales', format=',.2f'),
+                                                    alt.Tooltip('Percentage:Q', title='%', format='.1f')
+                                                ]
+                                            ).properties(
+                                                width=300,
+                                                height=300,
+                                                title=f"Category Distribution - {selected_customer.split(' | ')[0]}"
+                                            )
                                             
-                                            # สร้าง Display Date column ที่จะแสดงเฉพาะแถวแรกของแต่ละวัน
-                                            purchase_detail['Display_Date'] = purchase_detail['Date_str']
+                                            st.altair_chart(pie_chart, use_container_width=True)
                                             
-                                            # ทำให้ Date แสดงเฉพาะแถวแรกของแต่ละวัน (เลียนแบบ merge cells)
-                                            prev_date = None
-                                            for i, row in purchase_detail.iterrows():
-                                                current_date = row['Date_str']
-                                                if current_date == prev_date:
-                                                    purchase_detail.at[i, 'Display_Date'] = ''  # แสดงเป็นช่องว่าง
-                                                prev_date = current_date
+                                            # เพิ่มตารางรายละเอียด Category + SKU
+                                            st.markdown("---")
+                                            st.markdown("##### 📋 Detailed Purchase List")
                                             
-                                            # จัดเรียงคอลัมน์สำหรับแสดงผล (ไม่รวม Category)
-                                            display_columns = ['Display_Date', 'Cate_brand', 'Item', 'Net sales']
-                                            final_display_cols = [col for col in display_columns if col in purchase_detail.columns]
+                                            # เตรียมข้อมูล: เพิ่มคอลัมน์เดือน
+                                            customer_sales_with_month = customer_sales.copy()
+                                            if 'Date' in customer_sales_with_month.columns:
+                                                customer_sales_with_month['Date'] = pd.to_datetime(customer_sales_with_month['Date'], errors='coerce')
+                                                customer_sales_with_month['Month'] = customer_sales_with_month['Date'].dt.to_period('M').astype(str)
+                                            else:
+                                                customer_sales_with_month['Month'] = 'N/A'
                                             
-                                            # เปลี่ยนชื่อคอลัมน์สำหรับแสดงผล
-                                            column_mapping = {
-                                                'Display_Date': 'Date',
-                                                'Cate_brand': 'Category+Brand',
-                                                'Item': 'Item',
-                                                'Net sales': 'Net Sales'
-                                            }
+                                            # สร้างตารางรายละเอียดแสดง เดือน, Category และ SKU ทั้งหมด
+                                            detailed_data = customer_sales_with_month.groupby(['Month', 'Category_disp', 'Item']).agg({
+                                                'Net sales': 'sum',
+                                                'Quantity': 'sum' if 'Quantity' in customer_sales_with_month.columns else 'count',
+                                                'Receipt number': 'nunique' if 'Receipt number' in customer_sales_with_month.columns else 'count'
+                                            }).reset_index()
                                             
-                                            display_table = purchase_detail[final_display_cols].copy()
-                                            display_table.columns = [column_mapping.get(col, col) for col in final_display_cols]
+                                            detailed_data.columns = ['Month', 'Category', 'SKU/Item', 'Total Sales (฿)', 'Quantity', 'Orders']
+                                            detailed_data = detailed_data.sort_values(['Month', 'Category', 'Total Sales (฿)'], ascending=[False, True, False])
                                             
-                                            # สร้าง custom CSS สำหรับ styling
-                                            def style_dataframe(df):
-                                                # สร้าง styler object
-                                                styler = df.style
-                                                
-                                                # Format ตัวเลข
-                                                if 'Net Sales' in df.columns:
-                                                    styler = styler.format({'Net Sales': '{:,.2f}'})
-                                                
-                                                # เพิ่ม CSS สำหรับ border และ styling
-                                                styler = styler.set_table_styles([
-                                                    {'selector': 'table', 'props': [('border-collapse', 'collapse'), ('width', '100%')]},
-                                                    {'selector': 'th', 'props': [('border', '1px solid #ddd'), ('padding', '8px'), ('background-color', '#f2f2f2'), ('text-align', 'center')]},
-                                                    {'selector': 'td', 'props': [('border', '1px solid #ddd'), ('padding', '8px'), ('text-align', 'left')]},
-                                                    {'selector': 'tr:nth-child(even)', 'props': [('background-color', '#f9f9f9')]},
-                                                ])
-                                                
-                                                return styler
+                                            # คำนวณ % ของแต่ละ SKU
+                                            total_customer_sales = detailed_data['Total Sales (฿)'].sum()
+                                            detailed_data['% of Total'] = (detailed_data['Total Sales (฿)'] / total_customer_sales * 100).round(2)
+                                            
+                                            # จัดรูปแบบตัวเลข
+                                            detailed_data['Total Sales (฿)'] = detailed_data['Total Sales (฿)'].apply(lambda x: f"{x:,.2f}")
+                                            detailed_data['Quantity'] = detailed_data['Quantity'].apply(lambda x: int(x))
+                                            detailed_data['Orders'] = detailed_data['Orders'].apply(lambda x: int(x))
+                                            detailed_data['% of Total'] = detailed_data['% of Total'].apply(lambda x: f"{x:.2f}%")
+                                            
+                                            # แสดง Month แค่ครั้งแรกของแต่ละเดือน (เดือนซ้ำจะเป็นค่าว่าง)
+                                            detailed_data_display = detailed_data.copy()
+                                            detailed_data_display['Month'] = detailed_data_display['Month'].where(
+                                                detailed_data_display['Month'] != detailed_data_display['Month'].shift(), ''
+                                            )
+                                            
+                                            # สรุปสถิติด้านบนตาราง
+                                            col_stat1, col_stat2, col_stat3 = st.columns(3)
+                                            with col_stat1:
+                                                st.metric("📊 Total Categories", len(detailed_data['Category'].unique()))
+                                            with col_stat2:
+                                                st.metric("📦 Total SKUs", len(detailed_data))
+                                            with col_stat3:
+                                                st.metric("💰 Total Sales", f"{total_customer_sales:,.2f} ฿")
                                             
                                             # แสดงตาราง
-                                            st.dataframe(style_dataframe(display_table), use_container_width=True, hide_index=True)
+                                            st.dataframe(
+                                                detailed_data_display,
+                                                use_container_width=True,
+                                                hide_index=True,
+                                                height=400
+                                            )
+                                        
+                                        # Channel & Payment Method Analysis
+                                        st.markdown("---")
+                                        st.markdown("#### 💳 Channel & Payment Analysis")
+                                        
+                                        if 'Channel' in customer_sales.columns and 'Method' in customer_sales.columns:
+                                            # วิเคราะห์ Channel และ Method
+                                            channel_method_data = customer_sales[customer_sales['Channel'] != 'Unknown'].copy()
                                             
-                                            # เพิ่มคำอธิบายใต้ตาราง
-                                            st.caption("💡 วันที่เดียวกันจะแสดงเฉพาะในแถวแรก (เลียนแบบ merged cells)")
+                                            if not channel_method_data.empty:
+                                                col_channel, col_method = st.columns(2)
+                                                
+                                                with col_channel:
+                                                    st.markdown("##### 🏪 Sales by Channel")
+                                                    
+                                                    # วิเคราะห์ตาม Channel
+                                                    channel_summary = channel_method_data.groupby('Channel').agg({
+                                                        'Net sales': 'sum',
+                                                        'Receipt number': 'nunique' if 'Receipt number' in channel_method_data.columns else 'count',
+                                                        'Quantity': 'sum' if 'Quantity' in channel_method_data.columns else 'count'
+                                                    }).reset_index()
+                                                    channel_summary.columns = ['Channel', 'Total Sales', 'Orders', 'Items']
+                                                    channel_summary = channel_summary.sort_values('Total Sales', ascending=False)
+                                                    
+                                                    # คำนวณเปอร์เซ็นต์
+                                                    total_channel_sales = channel_summary['Total Sales'].sum()
+                                                    channel_summary['%'] = (channel_summary['Total Sales'] / total_channel_sales * 100).round(1)
+                                                    
+                                                    # แสดงผลแบบ card
+                                                    for _, row in channel_summary.iterrows():
+                                                        emoji = "🏪" if row['Channel'] == "หน้าร้าน" else "🚚" if row['Channel'] == "ส่งของ" else "❓"
+                                                        st.markdown(f"""
+                                                        <div style='background-color: #f0f2f6; padding: 12px; margin: 8px 0; border-radius: 8px; border-left: 4px solid #1f77b4;'>
+                                                            <h4 style='margin: 0;'>{emoji} {row['Channel']}</h4>
+                                                            <p style='margin: 5px 0; font-size: 1.1em;'><strong>💰 {row['Total Sales']:,.2f} บาท</strong> ({row['%']:.1f}%)</p>
+                                                            <p style='margin: 5px 0; color: #666;'>📋 {int(row['Orders'])} orders | 📦 {int(row['Items'])} items</p>
+                                                        </div>
+                                                        """, unsafe_allow_html=True)
+                                                    
+                                                    # Pie Chart สำหรับ Channel
+                                                    if len(channel_summary) > 0:
+                                                        import altair as alt
+                                                        pie_channel = alt.Chart(channel_summary).mark_arc(innerRadius=50).encode(
+                                                            theta=alt.Theta('Total Sales:Q'),
+                                                            color=alt.Color('Channel:N', scale=alt.Scale(scheme='category10')),
+                                                            tooltip=['Channel:N', alt.Tooltip('Total Sales:Q', format=',.2f'), '%:Q']
+                                                        ).properties(width=250, height=250, title='Sales Distribution by Channel')
+                                                        st.altair_chart(pie_channel, use_container_width=True)
+                                                
+                                                with col_method:
+                                                    st.markdown("##### 💵 Sales by Payment Method")
+                                                    
+                                                    # วิเคราะห์ตาม Method
+                                                    method_summary = channel_method_data.groupby('Method').agg({
+                                                        'Net sales': 'sum',
+                                                        'Receipt number': 'nunique' if 'Receipt number' in channel_method_data.columns else 'count',
+                                                        'Quantity': 'sum' if 'Quantity' in channel_method_data.columns else 'count'
+                                                    }).reset_index()
+                                                    method_summary.columns = ['Method', 'Total Sales', 'Orders', 'Items']
+                                                    method_summary = method_summary.sort_values('Total Sales', ascending=False)
+                                                    
+                                                    # คำนวณเปอร์เซ็นต์
+                                                    total_method_sales = method_summary['Total Sales'].sum()
+                                                    method_summary['%'] = (method_summary['Total Sales'] / total_method_sales * 100).round(1)
+                                                    
+                                                    # แสดงผลแบบ card
+                                                    for _, row in method_summary.iterrows():
+                                                        emoji = "💵" if row['Method'] == "เงินสด" else "💳" if row['Method'] == "เงินโอน" else "❓"
+                                                        st.markdown(f"""
+                                                        <div style='background-color: #f0f2f6; padding: 12px; margin: 8px 0; border-radius: 8px; border-left: 4px solid #2ca02c;'>
+                                                            <h4 style='margin: 0;'>{emoji} {row['Method']}</h4>
+                                                            <p style='margin: 5px 0; font-size: 1.1em;'><strong>💰 {row['Total Sales']:,.2f} บาท</strong> ({row['%']:.1f}%)</p>
+                                                            <p style='margin: 5px 0; color: #666;'>📋 {int(row['Orders'])} orders | 📦 {int(row['Items'])} items</p>
+                                                        </div>
+                                                        """, unsafe_allow_html=True)
+                                                    
+                                                    # Pie Chart สำหรับ Method
+                                                    if len(method_summary) > 0:
+                                                        pie_method = alt.Chart(method_summary).mark_arc(innerRadius=50).encode(
+                                                            theta=alt.Theta('Total Sales:Q'),
+                                                            color=alt.Color('Method:N', scale=alt.Scale(scheme='set2')),
+                                                            tooltip=['Method:N', alt.Tooltip('Total Sales:Q', format=',.2f'), '%:Q']
+                                                        ).properties(width=250, height=250, title='Sales Distribution by Payment Method')
+                                                        st.altair_chart(pie_method, use_container_width=True)
+                                                
+                                                # สรุป Channel x Method
+                                                st.markdown("##### 📊 Channel × Payment Method Matrix")
+                                                channel_method_matrix = channel_method_data.groupby(['Channel', 'Method'])['Net sales'].sum().reset_index()
+                                                pivot_matrix = channel_method_matrix.pivot(index='Channel', columns='Method', values='Net sales').fillna(0)
+                                                
+                                                # จัดรูปแบบตัวเลข
+                                                pivot_display = pivot_matrix.copy()
+                                                for col in pivot_display.columns:
+                                                    pivot_display[col] = pivot_display[col].apply(lambda x: f"{x:,.2f}")
+                                                
+                                                st.dataframe(pivot_display, use_container_width=True)
+                                                
+                                            else:
+                                                st.info("📊 ไม่มีข้อมูล Channel/Method ที่ระบุได้สำหรับลูกค้าคนนี้")
+                                        else:
+                                            st.warning("⚠️ ไม่มีข้อมูล Channel และ Method - กรุณา upload Receipts data file")
                                         
-                                        # Download button (ไม่รวม Category column)
-                                        csv_cols = ['Date_str', 'Cate_brand', 'Item', 'Net sales']
-                                        available_csv_cols = [col for col in csv_cols if col in purchase_detail.columns]
-                                        csv_data = purchase_detail[available_csv_cols].copy()
+                                        # Product Recommendation Section
+                                        st.markdown("---")
+                                        st.markdown("#### 💡 Product Recommendations")
                                         
-                                        # เปลี่ยนชื่อคอลัมน์สำหรับ CSV
-                                        csv_column_mapping = {
-                                            'Date_str': 'Date',
-                                            'Cate_brand': 'Category+Brand', 
-                                            'Item': 'Item', 
-                                            'Net sales': 'Net Sales'
-                                        }
-                                        csv_data.columns = [csv_column_mapping.get(col, col) for col in available_csv_cols]
-                                        csv_download = csv_data.to_csv(index=False)
+                                        # ดึงข้อมูล Category ทั้งหมดจากระบบ
+                                        all_categories = [
+                                            'CAT Food', 'CAT Litter', 'CAT Pouch / Wet Food', 'CAT Snack', 'CAT Toys&Tools&Supplies',
+                                            'DOG Food', 'DOG Pouch / Wet Food', 'DOG Snack', 'DOG Toys&Tools&Supplies',
+                                            'FOOD & SNACK หมา+แมว', 'TOYS & TOOLS หมา+แมว', 'ฟันแทะ'
+                                        ]
                                         
-                                        st.download_button(
-                                            label="📥 Download Purchase Data",
-                                            data=csv_download,
-                                            file_name=f"customer_detail_{selected_customer.split(' | ')[0]}.csv",
-                                            mime="text/csv"
-                                        )
+                                        # แยก Categories ตาม Pet Type
+                                        # แยก BOTH categories ออกมาก่อน
+                                        both_categories = [cat for cat in all_categories if 'หมา+แมว' in cat]
+                                        
+                                        # CAT และ DOG categories ต้องไม่รวม BOTH categories
+                                        cat_categories = [cat for cat in all_categories if ('CAT' in cat or 'แมว' in cat) and cat not in both_categories]
+                                        dog_categories = [cat for cat in all_categories if ('DOG' in cat or 'หมา' in cat) and cat not in both_categories]
+                                        
+                                        # หา Categories ที่ลูกค้าเคยซื้อ
+                                        customer_categories = set(customer_sales['Category_disp'].unique()) if not customer_sales.empty else set()
+                                        
+                                        # แนะนำตามการคาดการณ์ Pet Type
+                                        recommendations = []
+                                        
+                                        if has_cat and has_dog:
+                                            # เลี้ยงทั้งคู่ - แนะนำทั้ง Cat, Dog และ Both categories
+                                            recommend_cats = [cat for cat in cat_categories if cat not in customer_categories]
+                                            recommend_dogs = [dog for dog in dog_categories if dog not in customer_categories]
+                                            recommend_both = [both for both in both_categories if both not in customer_categories]
+                                            
+                                            if recommend_cats:
+                                                recommendations.extend([("🐱 Cat Products", recommend_cats)])
+                                            if recommend_dogs:
+                                                recommendations.extend([("🐶 Dog Products", recommend_dogs)])
+                                            if recommend_both:
+                                                recommendations.extend([("🐱🐶 Universal Products", recommend_both)])
+                                                
+                                        elif has_cat:
+                                            # เลี้ยงแค่แมว - แนะนำ Cat categories และ Both categories
+                                            recommend_cats = [cat for cat in cat_categories if cat not in customer_categories]
+                                            recommend_both = [both for both in both_categories if both not in customer_categories]
+                                            
+                                            if recommend_cats:
+                                                recommendations.extend([("🐱 Cat Products", recommend_cats)])
+                                            if recommend_both:
+                                                recommendations.extend([("🐾 Universal Products", recommend_both)])
+                                                
+                                        elif has_dog:
+                                            # เลี้ยงแค่สุนัข - แนะนำ Dog categories และ Both categories
+                                            recommend_dogs = [dog for dog in dog_categories if dog not in customer_categories]
+                                            recommend_both = [both for both in both_categories if both not in customer_categories]
+                                            
+                                            if recommend_dogs:
+                                                recommendations.extend([("🐶 Dog Products", recommend_dogs)])
+                                            if recommend_both:
+                                                recommendations.extend([("🐾 Universal Products", recommend_both)])
+                                                
+                                        else:
+                                            # ไม่ทราบประเภท - แนะนำทุกอย่างที่ยังไม่เคยซื้อ
+                                            all_recommend = [cat for cat in all_categories if cat not in customer_categories]
+                                            if all_recommend:
+                                                recommendations.extend([("🛍️ Suggested Products", all_recommend)])
+                                        
+                                        # แสดงผล Recommendations
+                                        if recommendations:
+                                            col_rec1, col_rec2 = st.columns(2)
+                                            
+                                            with col_rec1:
+                                                st.success(f"""
+                                                **🎯 Recommendation Strategy**
+                                                
+                                                **Based on:** {prediction}
+                                                
+                                                **ลูกค้าคนนี้น่าจะสนใจสินค้าที่ยังไม่เคยซื้อ**
+                                                
+                                                **Categories ที่เคยซื้อ:** {len(customer_categories)} ประเภท
+                                                """)
+                                            
+                                            with col_rec2:
+                                                # แสดงสถิติการแนะนำ
+                                                total_recommends = sum(len(cats) for _, cats in recommendations)
+                                                st.info(f"""
+                                                **📊 Recommendation Stats**
+                                                
+                                                **Categories ที่แนะนำ:** {total_recommends} ประเภท
+                                                
+                                                **Recommendation Types:** {len(recommendations)} กลุ่ม
+                                                
+                                                **Potential for Growth:** {'สูง' if total_recommends > 3 else 'ปานกลาง' if total_recommends > 0 else 'จำกัด'}
+                                                """)
+                                            
+                                            # แสดง Recommendations แยกตามกลุ่ม
+                                            for rec_type, rec_categories in recommendations:
+                                                if rec_categories:
+                                                    st.markdown(f"**{rec_type}:**")
+                                                    
+                                                    # แสดงเป็นแท็ก
+                                                    cols = st.columns(min(len(rec_categories), 3))
+                                                    for i, category in enumerate(rec_categories[:9]):  # จำกัดไม่เกิน 9 รายการ
+                                                        with cols[i % 3]:
+                                                            st.markdown(f"<div style='background-color: #f0f2f6; padding: 5px; margin: 2px; border-radius: 5px; text-align: center; font-size: 0.9em;'>{category}</div>", 
+                                                                      unsafe_allow_html=True)
+                                                    
+                                                    if len(rec_categories) > 9:
+                                                        st.caption(f"และอีก {len(rec_categories) - 9} ประเภท...")
+                                                    st.markdown("")
+                                        
+                                        else:
+                                            st.info("🎉 ลูกค้าคนนี้ได้ลองสินค้าครบทุกประเภทแล้ว!")
                                     else:
-                                        st.info("ไม่พบข้อมูลรายละเอียดการซื้อ")
-                                
-                                # Product Recommendation Section
-                                st.markdown("---")
-                                st.markdown("#### 💡 Product Recommendations")
-                                
-                                # ดึงข้อมูล Category ทั้งหมดจากระบบ
-                                all_categories = [
-                                    'CAT Food', 'CAT Litter', 'CAT Pouch / Wet Food', 'CAT Snack', 'CAT Toys&Tools&Supplies',
-                                    'DOG Food', 'DOG Pouch / Wet Food', 'DOG Snack', 'DOG Toys&Tools&Supplies',
-                                    'FOOD & SNACK หมา+แมว', 'TOYS & TOOLS หมา+แมว', 'ฟันแทะ'
-                                ]
-                                
-                                # แยก Categories ตาม Pet Type
-                                cat_categories = [cat for cat in all_categories if 'CAT' in cat or 'แมว' in cat]
-                                dog_categories = [cat for cat in all_categories if 'DOG' in cat or 'หมา' in cat]
-                                both_categories = [cat for cat in all_categories if 'หมา+แมว' in cat or 'ฟันแทะ' in cat]
-                                
-                                # หา Categories ที่ลูกค้าเคยซื้อ
-                                customer_categories = set(customer_sales['Category_disp'].unique()) if not customer_sales.empty else set()
-                                
-                                # แนะนำตามการคาดการณ์ Pet Type
-                                recommendations = []
-                                
-                                if has_cat and has_dog:
-                                    # เลี้ยงทั้งคู่ - แนะนำทั้ง Cat, Dog และ Both categories
-                                    recommend_cats = [cat for cat in cat_categories if cat not in customer_categories]
-                                    recommend_dogs = [dog for dog in dog_categories if dog not in customer_categories]
-                                    recommend_both = [both for both in both_categories if both not in customer_categories]
-                                    
-                                    if recommend_cats:
-                                        recommendations.extend([("🐱 Cat Products", recommend_cats)])
-                                    if recommend_dogs:
-                                        recommendations.extend([("🐶 Dog Products", recommend_dogs)])
-                                    if recommend_both:
-                                        recommendations.extend([("🐱🐶 Universal Products", recommend_both)])
-                                        
-                                elif has_cat:
-                                    # เลี้ยงแค่แมว - แนะนำ Cat categories และ Both categories
-                                    recommend_cats = [cat for cat in cat_categories if cat not in customer_categories]
-                                    recommend_both = [both for both in both_categories if both not in customer_categories]
-                                    
-                                    if recommend_cats:
-                                        recommendations.extend([("🐱 Cat Products", recommend_cats)])
-                                    if recommend_both:
-                                        recommendations.extend([("🐾 Universal Products", recommend_both)])
-                                        
-                                elif has_dog:
-                                    # เลี้ยงแค่สุนัข - แนะนำ Dog categories และ Both categories
-                                    recommend_dogs = [dog for dog in dog_categories if dog not in customer_categories]
-                                    recommend_both = [both for both in both_categories if both not in customer_categories]
-                                    
-                                    if recommend_dogs:
-                                        recommendations.extend([("🐶 Dog Products", recommend_dogs)])
-                                    if recommend_both:
-                                        recommendations.extend([("🐾 Universal Products", recommend_both)])
-                                        
+                                        st.warning("ไม่พบข้อมูลการขายของลูกค้าที่เลือก")
                                 else:
-                                    # ไม่ทราบประเภท - แนะนำทุกอย่างที่ยังไม่เคยซื้อ
-                                    all_recommend = [cat for cat in all_categories if cat not in customer_categories]
-                                    if all_recommend:
-                                        recommendations.extend([("🛍️ Suggested Products", all_recommend)])
-                                
-                                # แสดงผล Recommendations
-                                if recommendations:
-                                    col_rec1, col_rec2 = st.columns(2)
-                                    
-                                    with col_rec1:
-                                        st.success(f"""
-                                        **🎯 Recommendation Strategy**
-                                        
-                                        **Based on:** {prediction}
-                                        
-                                        **ลูกค้าคนนี้น่าจะสนใจสินค้าที่ยังไม่เคยซื้อ**
-                                        
-                                        **Categories ที่เคยซื้อ:** {len(customer_categories)} ประเภท
-                                        """)
-                                    
-                                    with col_rec2:
-                                        # แสดงสถิติการแนะนำ
-                                        total_recommends = sum(len(cats) for _, cats in recommendations)
-                                        st.info(f"""
-                                        **📊 Recommendation Stats**
-                                        
-                                        **Categories ที่แนะนำ:** {total_recommends} ประเภท
-                                        
-                                        **Recommendation Types:** {len(recommendations)} กลุ่ม
-                                        
-                                        **Potential for Growth:** {'สูง' if total_recommends > 3 else 'ปานกลาง' if total_recommends > 0 else 'จำกัด'}
-                                        """)
-                                    
-                                    # แสดง Recommendations แยกตามกลุ่ม
-                                    for rec_type, rec_categories in recommendations:
-                                        if rec_categories:
-                                            st.markdown(f"**{rec_type}:**")
-                                            
-                                            # แสดงเป็นแท็ก
-                                            cols = st.columns(min(len(rec_categories), 3))
-                                            for i, category in enumerate(rec_categories[:9]):  # จำกัดไม่เกิน 9 รายการ
-                                                with cols[i % 3]:
-                                                    st.markdown(f"<div style='background-color: #f0f2f6; padding: 5px; margin: 2px; border-radius: 5px; text-align: center; font-size: 0.9em;'>{category}</div>", 
-                                                              unsafe_allow_html=True)
-                                            
-                                            if len(rec_categories) > 9:
-                                                st.caption(f"และอีก {len(rec_categories) - 9} ประเภท...")
-                                            st.markdown("")
-                                
-                                else:
-                                    st.info("🎉 ลูกค้าคนนี้ได้ลองสินค้าครบทุกประเภทแล้ว!")
+                                    st.info("📋 กรุณาเลือกลูกค้าเพื่อดู Customer Portfolio")
                             else:
-                                st.info("📋 กรุณาเลือกลูกค้าเพื่อดู Customer Portfolio")
+                                st.warning("⚠️ ไม่พบข้อมูลลูกค้าที่ถูกต้องในไฟล์ยอดขาย")
                         else:
-                            st.info("ไม่มีข้อมูลลูกค้าสำหรับแสดง Portfolio")
-                            
+                            st.warning("⚠️ ไม่พบข้อมูลยอดขายที่สามารถใช้วิเคราะห์ลูกค้าได้")
+                        
                     except Exception as e:
                         st.error(f"❌ Error in Customer Portfolio: {str(e)}")
+                        
+                        # Debug information
+                        with st.expander("🔧 Debug Information", expanded=False):
+                            st.write("**Variables available:**")
+                            if 'customers_data' in locals():
+                                st.write(f"- customers_data: {'Available' if customers_data is not None else 'None'}")
+                            if 'customer_data_filtered' in locals():
+                                st.write(f"- customer_data_filtered: {'Available' if 'customer_data_filtered' in locals() else 'None'}")
+                            st.write(f"**Error details:** {str(e)}")
                         
                 except Exception as e:
                     st.error(f"❌ เกิดข้อผิดพลาดในการวิเคราะห์ลูกค้า: {str(e)}")
                     st.info("กรุณาตรวจสอบรูปแบบไฟล์และคอลัมน์ที่จำเป็น")
+                    
+                    # Debug information for outer exception
+                    with st.expander("🔧 Debug Information", expanded=False):
+                        st.write(f"**Outer Error details:** {str(e)}")
+                        if hasattr(e, '__traceback__'):
+                            import traceback
+                            st.code(traceback.format_exc())
 
         # -------------------- TAB 5: Promotion Recommendations --------------------
         with tab_promotion:
@@ -2867,16 +3945,33 @@ if st.session_state.get("ran") and uploaded_sales and uploaded_stock:
                     
                     # รวมข้อมูล Inventory กับ Last Sale Date
                     if 'SKU' in inventory_data.columns:
-                        # หา stock column
+                        # หา stock column - รองรับทั้งชื่อภาษาอังกฤษและภาษาไทย
                         stock_col = None
-                        for col in inventory_data.columns:
-                            if 'stock' in col.lower() and 'i-animal' in col.lower():
-                                stock_col = col
-                                break
+                        
+                        # ลองหาคอลัมน์ตามลำดับความสำคัญ
+                        if 'In stock [I-animal]' in inventory_data.columns:
+                            stock_col = 'In stock [I-animal]'
+                        elif 'คงเหลือ' in inventory_data.columns:
+                            stock_col = 'คงเหลือ'
+                        else:
+                            # ลองหาแบบ case-insensitive
+                            for col in inventory_data.columns:
+                                if 'in stock' in col.lower() and 'i-animal' in col.lower():
+                                    stock_col = col
+                                    break
+                            # ถ้ายังไม่เจอ ลองหาคอลัมน์ที่มีคำว่า "คงเหลือ"
+                            if stock_col is None:
+                                for col in inventory_data.columns:
+                                    if 'คงเหลือ' in col:
+                                        stock_col = col
+                                        break
                         
                         if stock_col is None:
-                            st.error("❌ ไม่พบคอลัมน์ Stock ในข้อมูล Inventory")
+                            st.error("❌ ไม่พบคอลัมน์ Stock (In stock [I-animal] หรือ คงเหลือ) ในข้อมูล Inventory")
+                            st.info(f"คอลัมน์ที่มีอยู่: {list(inventory_data.columns)}")
                             st.stop()
+                        
+                        st.info(f"✅ ใช้คอลัมน์ Stock: **{stock_col}**")
                         
                         # เตรียมข้อมูลสำหรับวิเคราะห์
                         promo_analysis = inventory_data[['SKU', 'Name', 'Category', stock_col, 'Price [I-animal]']].copy()
