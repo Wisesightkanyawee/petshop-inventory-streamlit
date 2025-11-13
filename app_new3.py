@@ -2710,8 +2710,8 @@ if st.session_state.get("ran") and uploaded_sales and uploaded_stock:
                         avg_sales_per_customer = original_total_sales / unique_customers if unique_customers > 0 else 0
                         st.metric("👤 Avg Sales/Customer", f"{avg_sales_per_customer:,.2f}")
                     
-                    # === 2. Top Customers ===
-                    st.subheader("🏆 Top Customers")
+                    # === 2. Customer Pareto Analysis ===
+                    st.subheader("📊 Customer Pareto Analysis")
                     
                     try:
                         # Enhanced aggregation with more metrics
@@ -2724,53 +2724,198 @@ if st.session_state.get("ran") and uploaded_sales and uploaded_stock:
                         if 'Gross profit' in customer_data_filtered.columns:
                             agg_dict['Gross profit'] = 'sum'
                         
-                        top_customers = customer_data_filtered.groupby('customer_key').agg(agg_dict).round(2)
+                        customer_agg = customer_data_filtered.groupby('customer_key').agg(agg_dict).round(2)
                         
                         # Rename columns
-                        new_columns = ['Total_Sales', 'Total_Orders']
+                        new_columns = ['Net_sales', 'Total_Orders']
                         if 'Gross profit' in customer_data_filtered.columns:
-                            new_columns.append('Net_Profit')
+                            new_columns.append('Gross_profit')
                         
-                        top_customers.columns = new_columns
+                        customer_agg.columns = new_columns
                         
                         # Calculate average per bill
-                        top_customers['Avg_Per_Bill'] = (top_customers['Total_Sales'] / top_customers['Total_Orders']).round(2)
+                        customer_agg['Avg_Per_Bill'] = (customer_agg['Net_sales'] / customer_agg['Total_Orders']).round(2)
                         
-                        # Sort and get top 50
-                        top_customers = top_customers.sort_values('Total_Sales', ascending=False).head(50)
-                        top_customers = top_customers.reset_index()
+                        # ============== PARETO ANALYSIS FOR CUSTOMERS ==============
                         
-                        # Prepare display columns
-                        display_cols = ['customer_key', 'Total_Sales', 'Total_Orders', 'Avg_Per_Bill']
-                        column_names = ['Customer_Name', 'Total_Sales', 'Total_Orders', 'Avg_Per_Bill']
-                        format_dict = {
-                            'Total_Sales': '{:,.2f}',
-                            'Total_Orders': '{:,.0f}',
-                            'Avg_Per_Bill': '{:,.2f}'
-                        }
+                        # 1) Sales-based Pareto
+                        customer_pareto_sales = customer_agg.copy().reset_index()
+                        customer_pareto_sales = customer_pareto_sales.sort_values('Net_sales', ascending=False).reset_index(drop=True)
+                        customer_pareto_sales['Sales_Rank'] = range(1, len(customer_pareto_sales) + 1)
+                        customer_pareto_sales['Sales_Cumsum'] = customer_pareto_sales['Net_sales'].cumsum()
+                        total_sales = customer_pareto_sales['Net_sales'].sum()
+                        customer_pareto_sales['Sales_Cumulative_%'] = (customer_pareto_sales['Sales_Cumsum'] / total_sales * 100).round(2)
                         
-                        # Add Net_Profit if available
-                        if 'Net_Profit' in top_customers.columns:
-                            display_cols.insert(-1, 'Net_Profit')  # Insert before Avg_Per_Bill
-                            column_names.insert(-1, 'Net_Profit')
-                            format_dict['Net_Profit'] = '{:,.2f}'
+                        # 2) Profit-based Pareto (if profit available)
+                        if 'Gross_profit' in customer_agg.columns:
+                            customer_pareto_profit = customer_agg.copy().reset_index()
+                            customer_pareto_profit = customer_pareto_profit.sort_values('Gross_profit', ascending=False).reset_index(drop=True)
+                            customer_pareto_profit['Profit_Rank'] = range(1, len(customer_pareto_profit) + 1)
+                            customer_pareto_profit['Profit_Cumsum'] = customer_pareto_profit['Gross_profit'].cumsum()
+                            total_profit = customer_pareto_profit['Gross_profit'].sum()
+                            customer_pareto_profit['Profit_Cumulative_%'] = (customer_pareto_profit['Profit_Cumsum'] / total_profit * 100).round(2)
+                            
+                            # Create profit rank mapping
+                            profit_rank_dict = dict(zip(customer_pareto_profit['customer_key'], customer_pareto_profit['Profit_Rank']))
+                            profit_cumulative_dict = dict(zip(customer_pareto_profit['customer_key'], customer_pareto_profit['Profit_Cumulative_%']))
                         
-                        # Display table
-                        display_customers = top_customers[display_cols].copy()
-                        display_customers.columns = column_names
-                        st.dataframe(display_customers.style.format(format_dict), use_container_width=True)
+                        # Calculate 20% thresholds
+                        total_customers = len(customer_pareto_sales)
+                        top_20pct_customers = int(np.ceil(total_customers * 0.2))
                         
-                        # Download button
-                        csv_customers = top_customers.to_csv(index=False)
-                        st.download_button(
-                            label="📥 Download Customer List",
-                            data=csv_customers,
-                            file_name="top_customers.csv",
-                            mime="text/csv"
-                        )
+                        if 'Gross_profit' in customer_agg.columns:
+                            top_20pct_profit_customers = int(np.ceil(total_customers * 0.2))
+                            top_20_sales_share = customer_pareto_sales.loc[:top_20pct_customers-1, 'Net_sales'].sum() / total_sales if total_sales > 0 else 0
+                            top_20_profit_share = customer_pareto_profit.loc[:top_20pct_profit_customers-1, 'Gross_profit'].sum() / total_profit if total_profit > 0 else 0
+                        else:
+                            top_20_sales_share = customer_pareto_sales.loc[:top_20pct_customers-1, 'Net_sales'].sum() / total_sales if total_sales > 0 else 0
+                        
+                        # Create main analysis table
+                        analysis_table = customer_pareto_sales.copy()
+                        
+                        # Add profit information if available
+                        if 'Gross_profit' in customer_agg.columns:
+                            analysis_table['Profit_Rank'] = analysis_table['customer_key'].map(profit_rank_dict)
+                            analysis_table['Profit_Cumulative_%'] = analysis_table['customer_key'].map(profit_cumulative_dict)
+                        
+                        # Create Top20 tags
+                        def create_top20_sales_display(row):
+                            if row['Sales_Rank'] <= top_20pct_customers:
+                                return f"💰 Top20-Sales ({row['Sales_Rank']})"
+                            else:
+                                return ""
+                                
+                        def create_top20_profit_display(row):
+                            if 'Gross_profit' in customer_agg.columns and row.get('Profit_Rank', 999999) <= top_20pct_profit_customers:
+                                return f"🏆 Top20-Profit ({row['Profit_Rank']})"
+                            else:
+                                return ""
+
+                        analysis_table['Top20_Sales'] = analysis_table.apply(create_top20_sales_display, axis=1)
+                        if 'Gross_profit' in customer_agg.columns:
+                            analysis_table['Top20_Profit'] = analysis_table.apply(create_top20_profit_display, axis=1)
+                        
+                        # Calculate individual percentages
+                        analysis_table['Sales_Individual_%'] = (analysis_table['Net_sales'] / total_sales * 100).round(2)
+                        if 'Gross_profit' in customer_agg.columns:
+                            analysis_table['Profit_Individual_%'] = (analysis_table['Gross_profit'] / total_profit * 100).round(2)
+                        
+                        # Display summary statistics
+                        st.write(f"**จำนวนลูกค้าทั้งหมด: {total_customers:,} ราย**")
+                        st.write(f"**Top 20% ลูกค้า ({top_20pct_customers:,} ราย) = {top_20_sales_share*100:.1f}% ของยอดขายรวม**")
+                        if 'Gross_profit' in customer_agg.columns:
+                            st.write(f"**Top 20% ลูกค้าตามกำไร ({top_20pct_profit_customers:,} ราย) = {top_20_profit_share*100:.1f}% ของกำไรรวม**")
+                        
+                        # Create tabs for different views
+                        if 'Gross_profit' in customer_agg.columns:
+                            tab_all, tab_top_sales, tab_top_profit = st.tabs(["👥 All Customers", "💰 Top20-Sales", "🏆 Top20-Profit"])
+                        else:
+                            tab_all, tab_top_sales = st.tabs(["👥 All Customers", "💰 Top20-Sales"])
+                        
+                        with tab_all:
+                            # Prepare columns for All Customers tab
+                            all_display_cols = ['Sales_Rank', 'customer_key', 'Net_sales', 'Total_Orders', 'Avg_Per_Bill']
+                            if 'Gross_profit' in customer_agg.columns:
+                                all_display_cols.insert(3, 'Gross_profit')
+                            
+                            all_display_cols.extend(['Top20_Sales', 'Sales_Individual_%', 'Sales_Cumulative_%'])
+                            if 'Gross_profit' in customer_agg.columns:
+                                all_display_cols.insert(-1, 'Top20_Profit')
+                                all_display_cols.insert(-1, 'Profit_Individual_%')
+                            
+                            # Format the table
+                            format_dict = {
+                                'Net_sales': '{:,.2f}',
+                                'Total_Orders': '{:,.0f}',
+                                'Avg_Per_Bill': '{:,.2f}',
+                                'Sales_Individual_%': '{:.2f}%',
+                                'Sales_Cumulative_%': '{:.2f}%'
+                            }
+                            
+                            if 'Gross_profit' in customer_agg.columns:
+                                format_dict.update({
+                                    'Gross_profit': '{:,.2f}',
+                                    'Profit_Individual_%': '{:.2f}%'
+                                })
+                            
+                            st.dataframe(
+                                analysis_table[all_display_cols].style.format(format_dict),
+                                use_container_width=True,
+                                height=400
+                            )
+                            
+                            # Download button
+                            csv_all = analysis_table[all_display_cols].to_csv(index=False)
+                            st.download_button(
+                                label="📥 Download All Customer Analysis",
+                                data=csv_all,
+                                file_name="customer_pareto_analysis_all.csv",
+                                mime="text/csv"
+                            )
+                        
+                        with tab_top_sales:
+                            top_sales_customers = analysis_table[analysis_table['Top20_Sales'].str.len() > 0].copy()
+                            st.write(f"**จำนวนลูกค้า: {len(top_sales_customers)} ราย ({(len(top_sales_customers)/total_customers*100):.1f}% ของลูกค้าทั้งหมด)**")
+                            st.write(f"**สัดส่วนยอดขาย: {top_20_sales_share*100:.1f}% ของยอดขายรวม**")
+                            
+                            # Columns for Top20-Sales
+                            sales_display_cols = ['Sales_Rank', 'customer_key', 'Net_sales', 'Total_Orders', 'Avg_Per_Bill']
+                            if 'Gross_profit' in customer_agg.columns:
+                                sales_display_cols.insert(3, 'Gross_profit')
+                            
+                            sales_display_cols.extend(['Top20_Sales', 'Sales_Individual_%', 'Sales_Cumulative_%'])
+                            if 'Gross_profit' in customer_agg.columns:
+                                sales_display_cols.insert(-1, 'Top20_Profit')
+                                sales_display_cols.insert(-1, 'Profit_Individual_%')
+                            
+                            st.dataframe(
+                                top_sales_customers[sales_display_cols].style.format(format_dict),
+                                use_container_width=True
+                            )
+                        
+                        if 'Gross_profit' in customer_agg.columns:
+                            with tab_top_profit:
+                                top_profit_customers = analysis_table[analysis_table['Top20_Profit'].str.len() > 0].copy()
+                                
+                                # Sort by Profit_Rank for this tab
+                                top_profit_customers = top_profit_customers.sort_values('Profit_Rank').reset_index(drop=True)
+                                
+                                st.write(f"**จำนวนลูกค้า: {len(top_profit_customers)} ราย ({(len(top_profit_customers)/total_customers*100):.1f}% ของลูกค้าทั้งหมด)**")
+                                st.write(f"**สัดส่วนกำไร: {top_20_profit_share*100:.1f}% ของกำไรรวม**")
+                                
+                                # Columns for Top20-Profit (show Profit_Rank first)
+                                profit_display_cols = ['Profit_Rank', 'customer_key', 'Net_sales', 'Gross_profit', 'Total_Orders', 'Avg_Per_Bill',
+                                                     'Top20_Sales', 'Top20_Profit', 
+                                                     'Sales_Individual_%', 'Profit_Individual_%', 'Profit_Cumulative_%']
+                                
+                                # Add Profit_Cumulative_% formatting
+                                profit_format_dict = format_dict.copy()
+                                profit_format_dict['Profit_Cumulative_%'] = '{:.2f}%'
+                                
+                                st.dataframe(
+                                    top_profit_customers[profit_display_cols].style.format(profit_format_dict),
+                                    use_container_width=True
+                                )
+                        
+                        # Add explanation
+                        explanation_text = """
+                        **คำอธิบาย:**
+                        - **💰 Top20-Sales (rank)**: แสดงอันดับยอดขายหากลูกค้านี้อยู่ใน Top 20%
+                        - **Sales_Rank**: อันดับตามยอดขาย
+                        - **Sales_Cumulative_%**: ยอดสะสมตามยอดขาย
+                        """
+                        
+                        if 'Gross_profit' in customer_agg.columns:
+                            explanation_text += """
+                        - **🏆 Top20-Profit (rank)**: แสดงอันดับกำไรหากลูกค้านี้อยู่ใน Top 20%
+                        - **Profit_Rank**: อันดับตามกำไร (tab Top20-Profit)
+                        - **Profit_Cumulative_%**: ยอดสะสมตามกำไร (tab Top20-Profit)
+                            """
+                        
+                        st.markdown(explanation_text)
                         
                     except Exception as e:
-                        st.error(f"❌ Error in Top Customers: {str(e)}")
+                        st.error(f"❌ Error in Customer Pareto Analysis: {str(e)}")
                     
                     # === 3. Customer Portfolio ===
                     st.subheader("👤 Customer Portfolio")
